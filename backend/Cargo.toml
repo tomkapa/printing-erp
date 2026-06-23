@@ -1,0 +1,85 @@
+[package]
+name = "printing-erp"
+description = "Print MIS/ERP backend: HTTP API server (axum + sqlx + tokio)."
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/tomkapa/printing-erp"
+authors = ["Tom Tran"]
+
+[dependencies]
+# Async runtime & HTTP stack.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net", "time", "sync"] }
+axum = "0.8"
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["trace", "timeout", "cors", "request-id"] }
+
+# Persistence. `macros` is enabled only for `sqlx::migrate!` (compile-time
+# embedding of migration files). The compile-time `query!`/`query_as!` macros
+# are banned by CLAUDE.md §10 — runtime `sqlx::query` with bound params is used.
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "migrate", "macros"] }
+redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
+
+# Serialization, configuration & secrets.
+serde = { version = "1", features = ["derive"] }
+config = { version = "0.15", default-features = false, features = ["toml"] }
+secrecy = { version = "0.10", features = ["serde"] }
+
+# Errors.
+thiserror = "2"
+anyhow = "1"
+
+# Instrumentation (CLAUDE.md §2).
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+tracing-opentelemetry = "0.31"
+opentelemetry = "0.30"
+opentelemetry_sdk = { version = "0.30", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.30", default-features = false, features = ["grpc-tonic", "trace"] }
+opentelemetry-semantic-conventions = "0.30"
+
+# Shared value types.
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+unreachable_pub = "warn"
+missing_debug_implementations = "warn"
+# Lint *groups* sit at priority -1 so the individual lints above can override.
+rust_2024_compatibility = { level = "warn", priority = -1 }
+nonstandard_style = { level = "deny", priority = -1 }
+future_incompatible = { level = "deny", priority = -1 }
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "warn"
+panic = "warn"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+as_conversions = "deny"
+mem_forget = "deny"
+float_cmp = "deny"
+# Justified deviations (CLAUDE.md §7 permits removing a lint with justification):
+# - multiple_crate_versions: large async trees (axum + sqlx + opentelemetry)
+#   unavoidably pull duplicate transitive versions; not actionable in app code.
+# - module_name_repetitions: noisy on the `error::*Error` convention we use.
+# - redundant_pub_crate: directly conflicts with rustc's `unreachable_pub`.
+# - cargo_common_metadata: this crate is an internal binary, never published.
+# - doc_markdown: purely cosmetic backtick suggestions on product nouns.
+multiple_crate_versions = "allow"
+module_name_repetitions = "allow"
+redundant_pub_crate = "allow"
+cargo_common_metadata = "allow"
+doc_markdown = "allow"
+
+[profile.release]
+panic = "abort"

@@ -1,0 +1,88 @@
+//! Application wiring: build resources, mount the router, serve until shutdown.
+
+use crate::clock::SystemClock;
+use crate::config::{RedisSettings, Settings};
+use crate::http::{self, AppState};
+use redis::aio::ConnectionManager;
+use secrecy::ExposeSecret as _;
+use std::sync::Arc;
+use thiserror::Error;
+
+/// Failure while starting or running the HTTP server.
+#[derive(Debug, Error)]
+pub(crate) enum ServerError {
+    /// Database pool construction or migration failed.
+    #[error(transparent)]
+    Db(#[from] crate::db::DbError),
+
+    /// The Redis connection manager could not be established.
+    #[error("redis connection failed")]
+    Redis(#[from] redis::RedisError),
+
+    /// Binding the TCP listener or serving the app failed.
+    #[error("server I/O error")]
+    Io(#[from] std::io::Error),
+}
+
+/// Starts the server and blocks until graceful shutdown completes.
+///
+/// # Errors
+///
+/// Returns [`ServerError`] if the database pool or migrations fail, Redis is
+/// unreachable, or the TCP listener cannot bind / serve.
+pub(crate) async fn run(settings: Settings) -> Result<(), ServerError> {
+    let db = crate::db::connect(&settings.database).await?;
+    crate::db::migrate(&db).await?;
+    let redis = connect_redis(&settings.redis).await?;
+
+    let state = AppState::new(db, redis, Arc::new(SystemClock));
+    let app = http::router(state);
+
+    let address = settings.server.bind_address();
+    let listener = tokio::net::TcpListener::bind(&address).await?;
+    tracing::info!(event = "server.started", address = %address);
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
+
+    tracing::info!(event = "server.stopped");
+    Ok(())
+}
+
+/// Opens a multiplexed, auto-reconnecting Redis connection.
+async fn connect_redis(settings: &RedisSettings) -> Result<ConnectionManager, ServerError> {
+    let client = redis::Client::open(settings.url.expose_secret())?;
+    let manager = ConnectionManager::new(client).await?;
+    Ok(manager)
+}
+
+/// Resolves when the process receives `Ctrl+C` or (on Unix) `SIGTERM`.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        if let Err(error) = tokio::signal::ctrl_c().await {
+            tracing::error!(error = ?error, "failed to install Ctrl+C handler");
+        }
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        use tokio::signal::unix::{SignalKind, signal};
+        match signal(SignalKind::terminate()) {
+            Ok(mut stream) => {
+                stream.recv().await;
+            }
+            Err(error) => tracing::error!(error = ?error, "failed to install SIGTERM handler"),
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        () = ctrl_c => {},
+        () = terminate => {},
+    }
+
+    tracing::info!(event = "server.shutdown.signal_received");
+}

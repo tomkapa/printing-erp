@@ -1,0 +1,6 @@
+.git
+target
+node_modules
+frontend/dist
+**/*.rs.bk
+.env
