@@ -54,6 +54,13 @@ Every tenant-scoped row carries a `tenant_id`. Isolation is enforced in two
 layers: the application always filters by tenant, and PostgreSQL **Row-Level
 Security** is the backstop against a missing `WHERE tenant_id` (CLAUDE.md §10).
 
+Mechanism: each request opens a transaction that sets the `app.current_tenant`
+GUC (via `db::begin_tenant_tx`); a `FORCE ROW LEVEL SECURITY` policy on every
+tenant-scoped table compares `tenant_id` to that GUC — an unset GUC sees no rows
+(default-deny). For the policy to bind, the **serving role must be non-superuser
+and `NOBYPASSRLS`** (superusers bypass RLS entirely): the app serves as the
+least-privilege `erp_app` role and runs migrations as the admin `erp` role.
+
 ## Retry and idempotency
 
 State-changing operations are designed to be safely retryable. Long-running
@@ -66,6 +73,7 @@ see CLAUDE.md §6).
 ## Status
 
 Scaffold stage. Implemented so far: the multi-tenant foundation
-(`tenants`, `users`) and the platform skeleton (config, telemetry, DB pool,
-health probes). Subsequent migrations introduce the entities above following
-the pipeline order.
+(`tenants`, `users`, and **Row-Level Security** enforced via the `erp_app`
+serving role) and the platform skeleton (config, telemetry, DB pool, health
+probes). Subsequent migrations introduce the entities above following the
+pipeline order, each repeating the RLS pattern on its tenant-scoped tables.

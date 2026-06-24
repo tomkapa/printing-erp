@@ -16,6 +16,9 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+      # Cluster-init scripts (run once on first data-dir creation). Provisions
+      # the least-privilege `erp_app` role required for Row-Level Security.
+      - ./db/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U erp -d erp"]
       interval: 5s

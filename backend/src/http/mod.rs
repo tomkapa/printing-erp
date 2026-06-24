@@ -4,6 +4,7 @@ mod limits;
 mod router;
 mod routes;
 mod state;
+mod tenant;
 
 pub(crate) use router::router;
 pub(crate) use state::AppState;

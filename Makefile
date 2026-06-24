@@ -34,8 +34,8 @@ fmt: ## Format Rust code
 lint: ## Clippy with warnings denied
 	$(CARGO) clippy --all-targets --all-features -- -D warnings
 
-test: ## Run the Rust test suite
-	$(CARGO) test --all-features
+test: ## Run the Rust test suite (DATABASE_URL = admin role; #[sqlx::test] needs CREATEDB)
+	DATABASE_URL=$(DATABASE_URL) $(CARGO) test --all-features
 
 check: fmt lint test ## Format, lint and test
 

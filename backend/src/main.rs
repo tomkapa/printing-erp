@@ -15,6 +15,7 @@ mod app;
 mod clock;
 mod config;
 mod db;
+mod domain;
 mod http;
 mod telemetry;
 

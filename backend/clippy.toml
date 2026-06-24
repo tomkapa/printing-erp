@@ -1,0 +1,9 @@
+# Clippy configuration.
+#
+# `unwrap_used`/`expect_used` are denied/warned in production code (see
+# Cargo.toml [lints.clippy]) per CLAUDE.md §6–§7. Tests, however, legitimately
+# assert via unwrap/expect: a failed precondition in a test SHOULD panic and
+# fail the test. These keys scope that allowance to test code only — production
+# code remains held to the strict bar.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true

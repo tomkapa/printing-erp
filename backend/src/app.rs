@@ -31,8 +31,10 @@ pub(crate) enum ServerError {
 /// Returns [`ServerError`] if the database pool or migrations fail, Redis is
 /// unreachable, or the TCP listener cannot bind / serve.
 pub(crate) async fn run(settings: Settings) -> Result<(), ServerError> {
+    // Migrations run as the admin role (DDL); the serving pool then connects as
+    // the least-privilege role so Row-Level Security applies to every request.
+    crate::db::migrate(&settings.database).await?;
     let db = crate::db::connect(&settings.database).await?;
-    crate::db::migrate(&db).await?;
     let redis = connect_redis(&settings.redis).await?;
 
     let state = AppState::new(db, redis, Arc::new(SystemClock));

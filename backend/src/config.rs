@@ -53,8 +53,16 @@ impl ServerSettings {
 /// PostgreSQL connection settings.
 #[derive(Debug, Deserialize)]
 pub(crate) struct DatabaseSettings {
-    /// Full connection URL (`postgres://user:pass@host:port/db`).
+    /// Request-serving connection URL (`postgres://user:pass@host:port/db`).
+    ///
+    /// In production this is the least-privilege `erp_app` role, so Row-Level
+    /// Security applies — a superuser role would bypass it (CLAUDE.md §10).
     pub(crate) url: SecretString,
+    /// Admin URL used **only** to run migrations (DDL needs the owner role).
+    /// When absent, [`url`](Self::url) is reused — appropriate only when `url`
+    /// is itself an admin role.
+    #[serde(default)]
+    pub(crate) admin_url: Option<SecretString>,
     /// Maximum size of the connection pool.
     #[serde(default = "default_max_connections")]
     pub(crate) max_connections: u32,
@@ -67,6 +75,11 @@ impl DatabaseSettings {
     /// Pool acquire timeout as a [`Duration`].
     pub(crate) const fn acquire_timeout(&self) -> Duration {
         Duration::from_secs(self.acquire_timeout_secs)
+    }
+
+    /// URL to run migrations with: the admin role if configured, else [`url`].
+    pub(crate) fn migration_url(&self) -> &SecretString {
+        self.admin_url.as_ref().unwrap_or(&self.url)
     }
 }
 
@@ -163,10 +176,38 @@ mod tests {
     fn database_acquire_timeout_uses_seconds() {
         let database = DatabaseSettings {
             url: SecretString::from("postgres://localhost/erp"),
+            admin_url: None,
             max_connections: 5,
             acquire_timeout_secs: 7,
         };
         assert_eq!(database.acquire_timeout(), Duration::from_secs(7));
+    }
+
+    #[test]
+    fn migration_url_prefers_admin_then_falls_back_to_url() {
+        use secrecy::ExposeSecret as _;
+
+        let with_admin = DatabaseSettings {
+            url: SecretString::from("postgres://erp_app@localhost/erp"),
+            admin_url: Some(SecretString::from("postgres://erp@localhost/erp")),
+            max_connections: 5,
+            acquire_timeout_secs: 7,
+        };
+        assert_eq!(
+            with_admin.migration_url().expose_secret(),
+            "postgres://erp@localhost/erp"
+        );
+
+        let without_admin = DatabaseSettings {
+            url: SecretString::from("postgres://erp@localhost/erp"),
+            admin_url: None,
+            max_connections: 5,
+            acquire_timeout_secs: 7,
+        };
+        assert_eq!(
+            without_admin.migration_url().expose_secret(),
+            "postgres://erp@localhost/erp"
+        );
     }
 
     #[test]
