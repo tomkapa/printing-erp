@@ -18,12 +18,11 @@ pub(crate) const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
 /// backing service is reported quickly rather than hanging the probe.
 pub(crate) const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// Maximum accepted length of the `X-Tenant-Id` header value, in bytes
-/// (CLAUDE.md §5: every string crossing a trust boundary is length-capped).
-/// A canonical UUID is 36 chars; 40 leaves room for brace/URN-prefixed forms
-/// that `Uuid::parse_str` accepts while rejecting anything pathological before
-/// it reaches the parser.
-pub(crate) const MAX_TENANT_HEADER_BYTES: usize = 40;
+/// Maximum accepted `Authorization` header length, in bytes (CLAUDE.md §5:
+/// every string crossing a trust boundary is length-capped). An HS256 JWT for
+/// our small claim set is well under 1 KiB; 4 KiB leaves headroom while bounding
+/// parse work before any signature verification.
+pub(crate) const MAX_AUTH_HEADER_BYTES: usize = 4 * 1024;
 
 /// Upper bound on a tenant-scoped database round-trip from a request handler
 /// (CLAUDE.md §5: every I/O await is bounded). Generous for an OLTP query, but

@@ -1,0 +1,10 @@
+# cargo-audit configuration (run `cargo audit` from `backend/`).
+#
+# RUSTSEC-2023-0071 — Marvin timing side-channel in `rsa`. The crate is resolved
+# into Cargo.lock via `sqlx-macros-core`'s optional `sqlx-mysql` dependency, but
+# only the Postgres driver is enabled, so `rsa` is never compiled into the build
+# (`cargo tree -i rsa` reports nothing). No fixed release exists. We use Postgres
+# exclusively (backend/src/db.rs), so there is no exposure. The same advisory and
+# rationale are mirrored in deny.toml. Re-evaluate when a patched `rsa` ships.
+[advisories]
+ignore = ["RUSTSEC-2023-0071"]

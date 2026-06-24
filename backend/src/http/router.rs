@@ -1,12 +1,12 @@
 //! HTTP router assembly and global middleware.
 
 use super::limits;
-use super::routes::{health, tenant};
+use super::routes::{auth, health, tenant};
 use super::state::AppState;
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::http::StatusCode;
-use axum::routing::get;
+use axum::routing::{get, post};
 use tower_http::cors::CorsLayer;
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
@@ -20,9 +20,14 @@ pub(crate) fn router(state: AppState) -> Router {
     Router::new()
         .route("/health/live", get(health::live))
         .route("/health/ready", get(health::ready))
-        // Pre-auth tenant echo: demonstrates the `TenantScope` extractor
-        // end-to-end (see `http::tenant`). Replaced by authenticated routing
-        // when auth lands.
+        // Authentication (unauthenticated entry points).
+        .route("/auth/login", post(auth::login))
+        .route("/auth/refresh", post(auth::refresh))
+        .route("/auth/logout", post(auth::logout))
+        .route("/auth/password/forgot", post(auth::password_forgot))
+        .route("/auth/password/reset", post(auth::password_reset))
+        // Authenticated tenant echo: resolves the tenant from a verified access
+        // token (`AuthPrincipal`) and reports its RLS-visible user count.
         .route("/tenant/me", get(tenant::me))
         .layer(TraceLayer::new_for_http())
         .layer(TimeoutLayer::with_status_code(

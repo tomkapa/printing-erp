@@ -9,5 +9,9 @@
 //! the natural seed of the `erp-domain` crate referenced by `SPEC.md`.
 
 mod ids;
+mod password;
+mod user;
 
-pub(crate) use ids::{DomainError, TenantId};
+pub(crate) use ids::{RefreshTokenId, TenantId, UserId};
+pub(crate) use password::PlaintextPassword;
+pub(crate) use user::{Email, Role, TenantSlug};

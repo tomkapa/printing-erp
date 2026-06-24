@@ -12,12 +12,15 @@
 //! module boundary returns a typed `thiserror` enum.
 
 mod app;
+mod auth;
 mod clock;
 mod config;
 mod db;
 mod domain;
 mod http;
 mod telemetry;
+#[cfg(test)]
+mod testsupport;
 
 use anyhow::Context as _;
 
