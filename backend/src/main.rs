@@ -12,11 +12,13 @@
 //! module boundary returns a typed `thiserror` enum.
 
 mod app;
+mod assets;
 mod clock;
 mod config;
 mod db;
 mod domain;
 mod http;
+mod storage;
 mod telemetry;
 
 use anyhow::Context as _;

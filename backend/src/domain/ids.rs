@@ -56,9 +56,45 @@ impl TryFrom<&str> for TenantId {
     }
 }
 
+/// Identifier of an [`Asset`](crate::assets) — a tenant-scoped stored file.
+///
+/// Same invariants as [`TenantId`]: constructed only via [`TryFrom`], always a
+/// non-nil UUID, inner field private (CLAUDE.md §1). Read it with
+/// [`AssetId::as_uuid`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "Uuid")]
+pub(crate) struct AssetId(Uuid);
+
+impl AssetId {
+    /// The underlying UUID, for binding to SQL or rendering at the boundary.
+    pub(crate) const fn as_uuid(self) -> Uuid {
+        self.0
+    }
+}
+
+impl TryFrom<Uuid> for AssetId {
+    type Error = DomainError;
+
+    fn try_from(raw: Uuid) -> Result<Self, Self::Error> {
+        if raw.is_nil() {
+            return Err(DomainError::Nil("asset_id"));
+        }
+        Ok(Self(raw))
+    }
+}
+
+impl TryFrom<&str> for AssetId {
+    type Error = DomainError;
+
+    fn try_from(raw: &str) -> Result<Self, Self::Error> {
+        let parsed = Uuid::parse_str(raw).map_err(|_| DomainError::Malformed("asset_id"))?;
+        Self::try_from(parsed)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{DomainError, TenantId};
+    use super::{AssetId, DomainError, TenantId};
     use uuid::Uuid;
 
     #[test]
@@ -102,6 +138,29 @@ mod tests {
         assert!(
             result.is_err(),
             "nil uuid must not deserialize into a TenantId"
+        );
+    }
+
+    #[test]
+    fn asset_id_round_trips_and_parses() {
+        let raw = Uuid::new_v4();
+        let id = AssetId::try_from(raw).expect("non-nil uuid is a valid asset id");
+        assert_eq!(id.as_uuid(), raw);
+
+        let from_str =
+            AssetId::try_from(raw.to_string().as_str()).expect("canonical string parses");
+        assert_eq!(from_str, id);
+    }
+
+    #[test]
+    fn asset_id_rejects_nil_and_malformed() {
+        assert_eq!(
+            AssetId::try_from(Uuid::nil()).expect_err("nil rejected"),
+            DomainError::Nil("asset_id")
+        );
+        assert_eq!(
+            AssetId::try_from("not-a-uuid").expect_err("malformed rejected"),
+            DomainError::Malformed("asset_id")
         );
     }
 }

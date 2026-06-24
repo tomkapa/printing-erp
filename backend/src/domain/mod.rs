@@ -10,4 +10,4 @@
 
 mod ids;
 
-pub(crate) use ids::{DomainError, TenantId};
+pub(crate) use ids::{AssetId, DomainError, TenantId};

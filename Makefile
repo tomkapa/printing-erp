@@ -5,6 +5,13 @@
 CARGO        := cargo --manifest-path backend/Cargo.toml
 DATABASE_URL ?= postgres://erp:erp@localhost:5432/erp
 
+# Object storage for the live S3 round-trip test (points at the compose MinIO).
+STORAGE_ENDPOINT ?= http://localhost:9000
+STORAGE_REGION   ?= us-east-1
+STORAGE_BUCKET   ?= erp-assets
+STORAGE_KEY      ?= erp
+STORAGE_SECRET   ?= erp_secret_dev
+
 .PHONY: up down logs migrate backend frontend frontend-install fmt lint test check clean
 
 up: ## Start PostgreSQL + Redis
@@ -35,7 +42,13 @@ lint: ## Clippy with warnings denied
 	$(CARGO) clippy --all-targets --all-features -- -D warnings
 
 test: ## Run the Rust test suite (DATABASE_URL = admin role; #[sqlx::test] needs CREATEDB)
-	DATABASE_URL=$(DATABASE_URL) $(CARGO) test --all-features
+	DATABASE_URL=$(DATABASE_URL) \
+	APP__STORAGE__ENDPOINT_URL=$(STORAGE_ENDPOINT) \
+	APP__STORAGE__REGION=$(STORAGE_REGION) \
+	APP__STORAGE__BUCKET=$(STORAGE_BUCKET) \
+	APP__STORAGE__ACCESS_KEY_ID=$(STORAGE_KEY) \
+	APP__STORAGE__SECRET_ACCESS_KEY=$(STORAGE_SECRET) \
+	$(CARGO) test --all-features
 
 check: fmt lint test ## Format, lint and test
 

@@ -1,0 +1,24 @@
+# cargo-audit policy (CLAUDE.md §3, §8).
+#
+# Every advisory below is transitive through `aws-sdk-s3` (the official AWS SDK,
+# justified in Cargo.toml) and is not reachable/exploitable in our usage. Each is
+# triaged with a rationale; remove an entry once the SDK bumps the offending dep.
+[advisories]
+ignore = [
+    # --- aws-smithy-http-client's default TLS connector (hyper-rustls 0.24 /
+    # rustls 0.21). Production reaches R2/S3 through the SDK's maintained client;
+    # local MinIO is plain HTTP. Clears when the SDK updates its connector. ---
+    "RUSTSEC-2026-0104", # rustls-webpki: reachable panic parsing a CRL
+    "RUSTSEC-2026-0098", # rustls-webpki: URI-name constraints accepted
+    "RUSTSEC-2026-0099", # rustls-webpki: wildcard name constraints accepted
+    "RUSTSEC-2025-0134", # rustls-pemfile 1.x unmaintained
+
+    # --- core SDK deps, not driven by untrusted input here ---
+    "RUSTSEC-2026-0009", # time: DoS via stack exhaustion in parsing. time 0.3.51
+                         # fixes it but needs Rust 1.88; our MSRV is 1.85. The SDK
+                         # only formats signing timestamps, never parses attacker input.
+    "RUSTSEC-2026-0002", # lru: IterMut unsoundness — the SDK's internal endpoint cache.
+
+    # --- not in our normal dependency graph (`cargo tree -i rsa` is empty) ---
+    "RUSTSEC-2023-0071", # rsa: Marvin timing side-channel.
+]

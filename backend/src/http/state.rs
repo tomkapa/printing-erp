@@ -1,6 +1,7 @@
 //! Shared application state handed to every request handler.
 
 use crate::clock::Clock;
+use crate::storage::ObjectStore;
 use redis::aio::ConnectionManager;
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -14,17 +15,26 @@ use std::time::Instant;
 pub(crate) struct AppState {
     pub(crate) db: PgPool,
     pub(crate) redis: ConnectionManager,
+    /// S3-compatible object store, behind the [`ObjectStore`] boundary so the
+    /// real client and the test fake are interchangeable (CLAUDE.md §1, §9).
+    pub(crate) store: Arc<dyn ObjectStore>,
     clock: Arc<dyn Clock>,
     started_at: Instant,
 }
 
 impl AppState {
     /// Assembles state from already-constructed resource handles.
-    pub(crate) fn new(db: PgPool, redis: ConnectionManager, clock: Arc<dyn Clock>) -> Self {
+    pub(crate) fn new(
+        db: PgPool,
+        redis: ConnectionManager,
+        store: Arc<dyn ObjectStore>,
+        clock: Arc<dyn Clock>,
+    ) -> Self {
         let started_at = clock.now();
         Self {
             db,
             redis,
+            store,
             clock,
             started_at,
         }
@@ -44,6 +54,7 @@ impl std::fmt::Debug for AppState {
         f.debug_struct("AppState")
             .field("db", &"PgPool")
             .field("redis", &"ConnectionManager")
+            .field("store", &self.store)
             .field("clock", &self.clock)
             .field("started_at", &self.started_at)
             .finish()

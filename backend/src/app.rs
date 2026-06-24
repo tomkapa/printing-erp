@@ -3,6 +3,7 @@
 use crate::clock::SystemClock;
 use crate::config::{RedisSettings, Settings};
 use crate::http::{self, AppState};
+use crate::storage::S3ObjectStore;
 use redis::aio::ConnectionManager;
 use secrecy::ExposeSecret as _;
 use std::sync::Arc;
@@ -18,6 +19,10 @@ pub(crate) enum ServerError {
     /// The Redis connection manager could not be established.
     #[error("redis connection failed")]
     Redis(#[from] redis::RedisError),
+
+    /// The object-storage client could not be constructed (misconfiguration).
+    #[error(transparent)]
+    Storage(#[from] crate::storage::StorageError),
 
     /// Binding the TCP listener or serving the app failed.
     #[error("server I/O error")]
@@ -36,8 +41,10 @@ pub(crate) async fn run(settings: Settings) -> Result<(), ServerError> {
     crate::db::migrate(&settings.database).await?;
     let db = crate::db::connect(&settings.database).await?;
     let redis = connect_redis(&settings.redis).await?;
+    // Build the object-storage client once at startup (CLAUDE.md §9).
+    let store = Arc::new(S3ObjectStore::new(&settings.storage)?);
 
-    let state = AppState::new(db, redis, Arc::new(SystemClock));
+    let state = AppState::new(db, redis, store, Arc::new(SystemClock));
     let app = http::router(state);
 
     let address = settings.server.bind_address();

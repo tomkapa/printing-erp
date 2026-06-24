@@ -1,12 +1,12 @@
 //! HTTP router assembly and global middleware.
 
 use super::limits;
-use super::routes::{health, tenant};
+use super::routes::{assets, health, tenant};
 use super::state::AppState;
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::http::StatusCode;
-use axum::routing::get;
+use axum::routing::{get, post};
 use tower_http::cors::CorsLayer;
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
@@ -24,6 +24,11 @@ pub(crate) fn router(state: AppState) -> Router {
         // end-to-end (see `http::tenant`). Replaced by authenticated routing
         // when auth lands.
         .route("/tenant/me", get(tenant::me))
+        // Asset upload/download. Bytes move out of band via presigned URLs, so
+        // these endpoints carry only small JSON metadata.
+        .route("/assets", post(assets::create).get(assets::list))
+        .route("/assets/{id}", get(assets::get_one).delete(assets::delete))
+        .route("/assets/{id}/complete", post(assets::complete))
         .layer(TraceLayer::new_for_http())
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
