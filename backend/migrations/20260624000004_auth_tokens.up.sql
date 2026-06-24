@@ -4,9 +4,11 @@
 -- in 20260623000002_users_rls.up.sql (SPEC.md §Tenancy, CLAUDE.md §10).
 --
 -- Tokens are never stored in plaintext: the application stores `sha256(tenant ++
--- secret)` as a 32-byte BYTEA (the `octet_length = 32` CHECK enforces the width).
--- `issued_at` / `expires_at` are written by the app from its injected clock
--- (CLAUDE.md §11), not via a `DEFAULT now()`, so tests drive expiry deterministically.
+-- secret)` as a 32-byte BYTEA. The 32-byte width is guaranteed by the `TokenHash`
+-- newtype (`auth/opaque.rs`), not a DB CHECK — value invariants live only in the
+-- domain constructors so a rule change is a code edit, not a migration (matching
+-- `business_settings`). `issued_at` / `expires_at` are written by the app from its
+-- injected clock (CLAUDE.md §11), not `DEFAULT now()`, so tests drive expiry.
 
 CREATE TABLE refresh_tokens (
     id          UUID PRIMARY KEY     DEFAULT gen_random_uuid(),
@@ -22,8 +24,7 @@ CREATE TABLE refresh_tokens (
     issued_at   TIMESTAMPTZ NOT NULL,
     expires_at  TIMESTAMPTZ NOT NULL,
     -- NULL = live; set on rotation, logout, family revocation, or password reset.
-    revoked_at  TIMESTAMPTZ,
-    CONSTRAINT refresh_token_hash_is_sha256 CHECK (octet_length(token_hash) = 32)
+    revoked_at  TIMESTAMPTZ
 );
 
 CREATE UNIQUE INDEX refresh_tokens_token_hash_key ON refresh_tokens (token_hash);
@@ -38,8 +39,7 @@ CREATE TABLE password_reset_tokens (
     issued_at   TIMESTAMPTZ NOT NULL,
     expires_at  TIMESTAMPTZ NOT NULL,
     -- Single-use: set the moment a reset succeeds. NULL = unused.
-    consumed_at TIMESTAMPTZ,
-    CONSTRAINT reset_token_hash_is_sha256 CHECK (octet_length(token_hash) = 32)
+    consumed_at TIMESTAMPTZ
 );
 
 CREATE UNIQUE INDEX password_reset_tokens_token_hash_key ON password_reset_tokens (token_hash);
