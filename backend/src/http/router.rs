@@ -1,7 +1,7 @@
 //! HTTP router assembly and global middleware.
 
 use super::limits;
-use super::routes::{assets, health, tenant};
+use super::routes::{assets, health, settings, tenant};
 use super::state::AppState;
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
@@ -29,6 +29,12 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/assets", post(assets::create).get(assets::list))
         .route("/assets/{id}", get(assets::get_one).delete(assets::delete))
         .route("/assets/{id}/complete", post(assets::complete))
+        // Per-tenant business configuration (logo, identity, tax, currency,
+        // default unit). Resolved via the same `TenantScope` extractor.
+        .route(
+            "/settings",
+            get(settings::get_settings).put(settings::put_settings),
+        )
         .layer(TraceLayer::new_for_http())
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
