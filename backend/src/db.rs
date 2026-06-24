@@ -21,6 +21,53 @@ const TENANT_GUC: &str = "app.current_tenant";
 /// Embedded, reversible migrations applied by [`migrate`].
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
+/// Shared helpers for Row-Level Security integration tests across modules.
+///
+/// Every tenant-scoped table's test suite needs the same scaffolding: an
+/// `erp_app`-role pool (so the policy is genuinely exercised rather than bypassed
+/// by the admin role), a fresh tenant id, a seeded `tenants` row, and access to
+/// the embedded migration set for per-table reversibility checks. They live here
+/// once, beside the DB layer they exercise. `pub(crate)` under `#[cfg(test)]`
+/// widens visibility only within the test build, never the production surface
+/// (CLAUDE.md §3).
+#[cfg(test)]
+pub(crate) mod test_support {
+    use crate::domain::TenantId;
+    use sqlx::PgPool;
+    use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+    use uuid::Uuid;
+
+    /// The embedded migration set, for per-table reversibility checks.
+    pub(crate) fn migrator() -> &'static sqlx::migrate::Migrator {
+        &super::MIGRATOR
+    }
+
+    /// A fresh, valid tenant id (v4 UUIDs are never nil).
+    pub(crate) fn new_tenant() -> TenantId {
+        TenantId::try_from(Uuid::new_v4()).expect("v4 uuid is non-nil")
+    }
+
+    /// Connects a pool as the least-privilege `erp_app` role to the test DB. The
+    /// admin pool `#[sqlx::test]` provides is a superuser and would bypass RLS,
+    /// masking any regression.
+    pub(crate) async fn app_pool(opts: PgPoolOptions, conn: PgConnectOptions) -> PgPool {
+        opts.connect_with(conn.username("erp_app").password("erp_app"))
+            .await
+            .expect("connect to test database as erp_app")
+    }
+
+    /// Seeds a tenant directly (the root `tenants` table is not under RLS).
+    pub(crate) async fn seed_tenant(pool: &PgPool, tenant: TenantId, slug: &str) {
+        sqlx::query("INSERT INTO tenants (id, name, slug) VALUES ($1, $2, $3)")
+            .bind(tenant.as_uuid())
+            .bind("Acme Print Co")
+            .bind(slug)
+            .execute(pool)
+            .await
+            .expect("seed tenant");
+    }
+}
+
 /// Failure while connecting to PostgreSQL or running migrations.
 #[derive(Debug, Error)]
 pub(crate) enum DbError {
@@ -129,34 +176,11 @@ mod rls_tests {
     //! genuinely exercised — the admin pool `#[sqlx::test]` hands us is a
     //! superuser and would bypass RLS, masking any regression.
 
-    use super::{MIGRATOR, begin_tenant_tx};
+    use super::begin_tenant_tx;
+    use super::test_support::{app_pool, migrator, new_tenant, seed_tenant};
     use crate::domain::TenantId;
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
     use sqlx::{Connection as _, PgConnection, PgPool};
-    use uuid::Uuid;
-
-    /// A fresh, valid tenant id (v4 UUIDs are never nil).
-    fn new_tenant() -> TenantId {
-        TenantId::try_from(Uuid::new_v4()).expect("v4 uuid is non-nil")
-    }
-
-    /// Connects a pool as the least-privilege `erp_app` role to the test DB.
-    async fn app_pool(opts: PgPoolOptions, conn: PgConnectOptions) -> PgPool {
-        opts.connect_with(conn.username("erp_app").password("erp_app"))
-            .await
-            .expect("connect to test database as erp_app")
-    }
-
-    /// Seeds a tenant directly (the root `tenants` table is not under RLS).
-    async fn seed_tenant(pool: &PgPool, tenant: TenantId, slug: &str) {
-        sqlx::query("INSERT INTO tenants (id, name, slug) VALUES ($1, $2, $3)")
-            .bind(tenant.as_uuid())
-            .bind("Acme Print Co")
-            .bind(slug)
-            .execute(pool)
-            .await
-            .expect("seed tenant");
-    }
 
     /// Inserts a user inside the tenant's RLS context and commits.
     async fn seed_user(pool: &PgPool, tenant: TenantId, email: &str) {
@@ -262,7 +286,7 @@ mod rls_tests {
             .expect("read forcerowsecurity");
         assert!(forced_before, "migration must leave FORCE RLS enabled");
 
-        MIGRATOR
+        migrator()
             .undo(&mut admin, INIT_MIGRATION_VERSION)
             .await
             .expect("revert RLS migration");
@@ -272,7 +296,7 @@ mod rls_tests {
             .expect("read forcerowsecurity after undo");
         assert!(!forced_after_undo, "down migration must disable FORCE RLS");
 
-        MIGRATOR
+        migrator()
             .run(&mut admin)
             .await
             .expect("re-apply RLS migration");
