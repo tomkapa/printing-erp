@@ -17,3 +17,16 @@ pub(crate) const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
 /// Per-dependency timeout for readiness probes. Kept tight so an unhealthy
 /// backing service is reported quickly rather than hanging the probe.
 pub(crate) const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Maximum accepted length of the `X-Tenant-Id` header value, in bytes
+/// (CLAUDE.md §5: every string crossing a trust boundary is length-capped).
+/// A canonical UUID is 36 chars; 40 leaves room for brace/URN-prefixed forms
+/// that `Uuid::parse_str` accepts while rejecting anything pathological before
+/// it reaches the parser.
+pub(crate) const MAX_TENANT_HEADER_BYTES: usize = 40;
+
+/// Upper bound on a tenant-scoped database round-trip from a request handler
+/// (CLAUDE.md §5: every I/O await is bounded). Generous for an OLTP query, but
+/// tight enough to free the pooled connection on a stalled server or lock wait
+/// rather than hang until the global request timeout fires.
+pub(crate) const TENANT_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
