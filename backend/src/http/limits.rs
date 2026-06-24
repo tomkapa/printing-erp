@@ -29,3 +29,7 @@ pub(crate) const MAX_AUTH_HEADER_BYTES: usize = 4 * 1024;
 /// tight enough to free the pooled connection on a stalled server or lock wait
 /// rather than hang until the global request timeout fires.
 pub(crate) const TENANT_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Upper bound on a business-settings read/upsert round-trip (CLAUDE.md §5).
+/// A single-row keyed access; the same rationale as [`TENANT_QUERY_TIMEOUT`].
+pub(crate) const SETTINGS_QUERY_TIMEOUT: Duration = Duration::from_secs(5);

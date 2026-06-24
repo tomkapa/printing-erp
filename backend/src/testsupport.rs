@@ -18,9 +18,13 @@ use chrono::{DateTime, TimeZone as _, Utc};
 use redis::aio::ConnectionManager;
 use secrecy::SecretString;
 use sqlx::PgPool;
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use std::sync::Arc;
 use uuid::Uuid;
+
+// The RLS-test primitives (erp_app pool, tenant seeding, fresh ids) live beside
+// the DB layer in `db::test_support`; re-export them here so the auth and HTTP
+// tests share the same bounded helpers rather than a divergent copy.
+pub(crate) use crate::db::test_support::{app_pool, new_tenant, seed_tenant};
 
 /// A fixed wall-clock anchor for deterministic token timing.
 pub(crate) fn epoch() -> DateTime<Utc> {
@@ -30,11 +34,6 @@ pub(crate) fn epoch() -> DateTime<Utc> {
 /// A test clock frozen at [`epoch`] until advanced.
 pub(crate) fn test_clock() -> Arc<TestClock> {
     TestClock::new(epoch())
-}
-
-/// A fresh, valid tenant id (v4 UUIDs are never nil).
-pub(crate) fn new_tenant() -> TenantId {
-    TenantId::try_from(Uuid::new_v4()).expect("v4 uuid is non-nil")
 }
 
 /// Settings with a fixed signing secret and short, test-friendly lifetimes.
@@ -58,13 +57,6 @@ pub(crate) fn auth_context() -> Arc<AuthContext> {
     ))
 }
 
-/// Connects a pool as the least-privilege `erp_app` role to the test database.
-pub(crate) async fn app_pool(opts: PgPoolOptions, conn: PgConnectOptions) -> PgPool {
-    opts.connect_with(conn.username("erp_app").password("erp_app"))
-        .await
-        .expect("connect to test database as erp_app")
-}
-
 /// Connects the Redis manager (matches docker-compose; override with
 /// `APP__REDIS__URL`). Only the HTTP-level state needs it; flow tests use
 /// granular dependencies and skip it.
@@ -84,17 +76,6 @@ pub(crate) async fn app_state(
     auth: Arc<AuthContext>,
 ) -> AppState {
     AppState::new(pool, redis_manager().await, clock, auth)
-}
-
-/// Seeds a tenant directly (the root `tenants` table is not under RLS).
-pub(crate) async fn seed_tenant(pool: &PgPool, tenant: TenantId, slug: &str) {
-    sqlx::query("INSERT INTO tenants (id, name, slug) VALUES ($1, $2, $3)")
-        .bind(tenant.as_uuid())
-        .bind("Acme Print Co")
-        .bind(slug)
-        .execute(pool)
-        .await
-        .expect("seed tenant");
 }
 
 /// Inserts a user inside the tenant's RLS context and returns its id. The caller
