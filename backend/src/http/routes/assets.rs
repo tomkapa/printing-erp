@@ -1,9 +1,9 @@
 //! Asset upload/download routes.
 //!
-//! Every handler resolves the tenant via [`TenantScope`], runs DB work inside a
-//! [`db::begin_tenant_tx`] (so Row-Level Security applies), and bounds every I/O
-//! await with a timeout (CLAUDE.md §5). Bytes never transit the API: clients
-//! upload and download directly through presigned URLs.
+//! Every handler resolves the tenant from the authenticated [`AuthPrincipal`],
+//! runs DB work inside a [`db::begin_tenant_tx`] (so Row-Level Security applies),
+//! and bounds every I/O await with a timeout (CLAUDE.md §5). Bytes never transit
+//! the API: clients upload and download directly through presigned URLs.
 //!
 //! Flow: `POST /assets` records a `pending` row and returns a presigned PUT →
 //! the client uploads → `POST /assets/{id}/complete` HEAD-verifies and marks it
@@ -15,9 +15,9 @@ use crate::assets::{
 };
 use crate::db;
 use crate::domain::{AssetId, TenantId};
+use crate::http::AuthPrincipal;
 use crate::http::limits as http_limits;
 use crate::http::state::AppState;
-use crate::http::tenant::TenantScope;
 use crate::storage::PresignedUrl;
 use crate::storage::limits as storage_limits;
 use axum::Json;
@@ -78,9 +78,10 @@ pub(crate) struct ListQuery {
 /// `POST /assets` — record a pending asset and issue a presigned upload URL.
 pub(crate) async fn create(
     State(state): State<AppState>,
-    TenantScope(tenant): TenantScope,
+    principal: AuthPrincipal,
     Json(request): Json<CreateAssetRequest>,
 ) -> Result<(StatusCode, Json<CreateAssetResponse>), AssetError> {
+    let tenant = principal.tenant_id;
     let asset = AssetId::try_from(Uuid::new_v4())?;
     let key = StorageKey::new(tenant, asset);
 
@@ -100,10 +101,10 @@ pub(crate) async fn create(
             &mut tx,
             tenant,
             asset,
-            &key,
             &request.filename,
             request.content_type,
             request.size_bytes,
+            principal.user_id,
         )
         .await?;
         tx.commit().await?;
@@ -124,9 +125,10 @@ pub(crate) async fn create(
 /// `POST /assets/{id}/complete` — verify the uploaded bytes and mark `ready`.
 pub(crate) async fn complete(
     State(state): State<AppState>,
-    TenantScope(tenant): TenantScope,
+    principal: AuthPrincipal,
     Path(id): Path<Uuid>,
 ) -> Result<Json<AssetView>, AssetError> {
+    let tenant = principal.tenant_id;
     let asset = AssetId::try_from(id)?;
     let existing = fetch(&state, tenant, asset).await?;
     assert!(existing.size_bytes.get() > 0, "persisted size is positive");
@@ -160,9 +162,10 @@ pub(crate) async fn complete(
 /// `GET /assets` — list this tenant's non-deleted assets, newest first.
 pub(crate) async fn list(
     State(state): State<AppState>,
-    TenantScope(tenant): TenantScope,
+    principal: AuthPrincipal,
     Query(query): Query<ListQuery>,
 ) -> Result<Json<Vec<AssetView>>, AssetError> {
+    let tenant = principal.tenant_id;
     let limit = clamp_limit(query.limit);
     // Clamp the offset into `0..=MAX_ASSETS_OFFSET` so a client cannot force an
     // unbounded `OFFSET` scan (CLAUDE.md §5: every batch/scan is bounded).
@@ -184,9 +187,10 @@ pub(crate) async fn list(
 /// `GET /assets/{id}` — metadata plus a short-lived presigned download URL.
 pub(crate) async fn get_one(
     State(state): State<AppState>,
-    TenantScope(tenant): TenantScope,
+    principal: AuthPrincipal,
     Path(id): Path<Uuid>,
 ) -> Result<Json<AssetDetail>, AssetError> {
+    let tenant = principal.tenant_id;
     let asset = AssetId::try_from(id)?;
     let existing = fetch(&state, tenant, asset).await?;
 
@@ -210,9 +214,10 @@ pub(crate) async fn get_one(
 /// `DELETE /assets/{id}` — remove the bytes and soft-delete the row.
 pub(crate) async fn delete(
     State(state): State<AppState>,
-    TenantScope(tenant): TenantScope,
+    principal: AuthPrincipal,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, AssetError> {
+    let tenant = principal.tenant_id;
     let asset = AssetId::try_from(id)?;
     let existing = fetch(&state, tenant, asset).await?;
 
@@ -270,76 +275,72 @@ fn view_of(asset: Asset) -> AssetView {
 
 #[cfg(test)]
 mod tests {
-    //! End-to-end handler tests: real router + extractors + tenant transaction
-    //! against Postgres, with the in-memory object store standing in for S3.
+    //! End-to-end handler tests: real router + the `AuthPrincipal` extractor +
+    //! tenant transaction against Postgres, with the in-memory object store
+    //! standing in for S3. Requests carry a real Bearer access token minted from
+    //! the test [`AuthContext`](crate::auth::AuthContext) (CLAUDE.md §3).
 
-    use crate::clock::SystemClock;
-    use crate::domain::{AssetId, TenantId};
-    use crate::http::state::AppState;
+    use crate::domain::{AssetId, Role, TenantId};
     use crate::storage::InMemoryObjectStore;
+    use crate::testsupport;
     use crate::{assets::ContentType, assets::StorageKey};
     use axum::Router;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use http_body_util::BodyExt as _;
-    use sqlx::PgPool;
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
     use std::sync::Arc;
     use tower::ServiceExt as _;
-    use uuid::Uuid;
-
-    async fn app_pool(opts: PgPoolOptions, conn: PgConnectOptions) -> PgPool {
-        opts.connect_with(conn.username("erp_app").password("erp_app"))
-            .await
-            .expect("connect as erp_app")
-    }
-
-    async fn seed_tenant(pool: &PgPool, tenant: TenantId) {
-        sqlx::query("INSERT INTO tenants (id, name, slug) VALUES ($1, $2, $3)")
-            .bind(tenant.as_uuid())
-            .bind("Acme Print Co")
-            .bind(format!("t-{}", tenant.as_uuid()))
-            .execute(pool)
-            .await
-            .expect("seed tenant");
-    }
 
     /// Builds the full router backed by a real DB pool, real Redis and the
-    /// in-memory store; returns the store handle so a test can simulate the
-    /// client's direct upload.
+    /// in-memory store, with a seeded tenant + user. Returns the store handle (so
+    /// a test can simulate the client's direct upload), a `Bearer` header for the
+    /// seeded user, and that user's tenant.
     async fn setup(
         opts: PgPoolOptions,
         conn: PgConnectOptions,
-    ) -> (Router, InMemoryObjectStore, TenantId) {
-        let pool = app_pool(opts, conn).await;
-        let tenant = TenantId::try_from(Uuid::new_v4()).expect("non-nil");
-        seed_tenant(&pool, tenant).await;
-
-        let client = redis::Client::open("redis://localhost:6379").expect("redis url");
-        let redis = redis::aio::ConnectionManager::new(client)
-            .await
-            .expect("redis connect");
+    ) -> (Router, InMemoryObjectStore, String, TenantId) {
+        let pool = testsupport::app_pool(opts, conn).await;
+        let tenant = testsupport::new_tenant();
+        testsupport::seed_tenant(&pool, tenant, "acme").await;
+        let user =
+            testsupport::seed_user(&pool, tenant, "u@acme.test", Role::Admin, "x", true).await;
 
         let store = InMemoryObjectStore::default();
-        let state = AppState::new(pool, redis, Arc::new(store.clone()), Arc::new(SystemClock));
-        (crate::http::router(state), store, tenant)
+        let state = testsupport::app_state_with_store(
+            pool,
+            Arc::new(store.clone()),
+            testsupport::test_clock(),
+            testsupport::auth_context(),
+        )
+        .await;
+        let token = state
+            .auth()
+            .issue_access(user, tenant, Role::Admin, testsupport::epoch())
+            .expect("issue access token");
+        (
+            crate::http::router(state),
+            store,
+            format!("Bearer {token}"),
+            tenant,
+        )
     }
 
-    fn post_json(uri: &str, tenant: TenantId, body: &serde_json::Value) -> Request<Body> {
+    fn post_json(uri: &str, bearer: &str, body: &serde_json::Value) -> Request<Body> {
         Request::builder()
             .method("POST")
             .uri(uri)
-            .header("x-tenant-id", tenant.as_uuid().to_string())
+            .header("authorization", bearer)
             .header("content-type", "application/json")
             .body(Body::from(body.to_string()))
             .expect("build request")
     }
 
-    fn request(method: &str, uri: &str, tenant: TenantId) -> Request<Body> {
+    fn request(method: &str, uri: &str, bearer: &str) -> Request<Body> {
         Request::builder()
             .method(method)
             .uri(uri)
-            .header("x-tenant-id", tenant.as_uuid().to_string())
+            .header("authorization", bearer)
             .body(Body::empty())
             .expect("build request")
     }
@@ -368,8 +369,8 @@ mod tests {
     }
 
     /// Creates an asset and returns its id (as a `Uuid` string) and key.
-    async fn create_asset(app: &Router, tenant: TenantId) -> (String, StorageKey) {
-        let (status, body) = send(app.clone(), post_json("/assets", tenant, &create_body())).await;
+    async fn create_asset(app: &Router, bearer: &str, tenant: TenantId) -> (String, StorageKey) {
+        let (status, body) = send(app.clone(), post_json("/assets", bearer, &create_body())).await;
         assert_eq!(status, StatusCode::CREATED, "create returns 201");
         let id = body["asset_id"]
             .as_str()
@@ -384,8 +385,8 @@ mod tests {
         opts: PgPoolOptions,
         conn: PgConnectOptions,
     ) {
-        let (app, _store, tenant) = setup(opts, conn).await;
-        let (status, body) = send(app.clone(), post_json("/assets", tenant, &create_body())).await;
+        let (app, _store, bearer, _tenant) = setup(opts, conn).await;
+        let (status, body) = send(app.clone(), post_json("/assets", &bearer, &create_body())).await;
 
         assert_eq!(status, StatusCode::CREATED);
         assert!(
@@ -397,7 +398,7 @@ mod tests {
         assert_eq!(body["expires_in_secs"].as_u64(), Some(900));
 
         // The pending asset is now listable.
-        let (list_status, list_body) = send(app, request("GET", "/assets", tenant)).await;
+        let (list_status, list_body) = send(app, request("GET", "/assets", &bearer)).await;
         assert_eq!(list_status, StatusCode::OK);
         assert_eq!(list_body.as_array().map(Vec::len), Some(1));
         assert_eq!(list_body[0]["status"], "pending");
@@ -405,26 +406,26 @@ mod tests {
 
     #[sqlx::test]
     async fn create_rejects_unsupported_content_type(opts: PgPoolOptions, conn: PgConnectOptions) {
-        let (app, _store, tenant) = setup(opts, conn).await;
+        let (app, _store, bearer, _tenant) = setup(opts, conn).await;
         let body = serde_json::json!({
             "filename": "notes.txt",
             "content_type": "text/plain",
             "size_bytes": 10,
         });
-        let (status, _) = send(app, post_json("/assets", tenant, &body)).await;
+        let (status, _) = send(app, post_json("/assets", &bearer, &body)).await;
         // The `ContentType` newtype rejects it during JSON deserialization.
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[sqlx::test]
     async fn complete_marks_ready_when_size_matches(opts: PgPoolOptions, conn: PgConnectOptions) {
-        let (app, store, tenant) = setup(opts, conn).await;
-        let (id, key) = create_asset(&app, tenant).await;
+        let (app, store, bearer, tenant) = setup(opts, conn).await;
+        let (id, key) = create_asset(&app, &bearer, tenant).await;
         store.put(&key, 2048, ContentType::Pdf); // simulate the client upload
 
         let (status, body) = send(
             app,
-            request("POST", &format!("/assets/{id}/complete"), tenant),
+            request("POST", &format!("/assets/{id}/complete"), &bearer),
         )
         .await;
         assert_eq!(status, StatusCode::OK);
@@ -433,13 +434,13 @@ mod tests {
 
     #[sqlx::test]
     async fn complete_rejects_size_mismatch(opts: PgPoolOptions, conn: PgConnectOptions) {
-        let (app, store, tenant) = setup(opts, conn).await;
-        let (id, key) = create_asset(&app, tenant).await;
+        let (app, store, bearer, tenant) = setup(opts, conn).await;
+        let (id, key) = create_asset(&app, &bearer, tenant).await;
         store.put(&key, 1024, ContentType::Pdf); // declared 2048, uploaded 1024
 
         let (status, _) = send(
             app,
-            request("POST", &format!("/assets/{id}/complete"), tenant),
+            request("POST", &format!("/assets/{id}/complete"), &bearer),
         )
         .await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
@@ -447,10 +448,10 @@ mod tests {
 
     #[sqlx::test]
     async fn get_one_returns_download_url(opts: PgPoolOptions, conn: PgConnectOptions) {
-        let (app, _store, tenant) = setup(opts, conn).await;
-        let (id, _key) = create_asset(&app, tenant).await;
+        let (app, _store, bearer, tenant) = setup(opts, conn).await;
+        let (id, _key) = create_asset(&app, &bearer, tenant).await;
 
-        let (status, body) = send(app, request("GET", &format!("/assets/{id}"), tenant)).await;
+        let (status, body) = send(app, request("GET", &format!("/assets/{id}"), &bearer)).await;
         assert_eq!(status, StatusCode::OK);
         assert!(
             body["download_url"]
@@ -463,28 +464,29 @@ mod tests {
 
     #[sqlx::test]
     async fn delete_soft_deletes_then_404(opts: PgPoolOptions, conn: PgConnectOptions) {
-        let (app, _store, tenant) = setup(opts, conn).await;
-        let (id, _key) = create_asset(&app, tenant).await;
+        let (app, _store, bearer, tenant) = setup(opts, conn).await;
+        let (id, _key) = create_asset(&app, &bearer, tenant).await;
 
         let (status, _) = send(
             app.clone(),
-            request("DELETE", &format!("/assets/{id}"), tenant),
+            request("DELETE", &format!("/assets/{id}"), &bearer),
         )
         .await;
         assert_eq!(status, StatusCode::NO_CONTENT);
 
-        let (after, _) = send(app, request("GET", &format!("/assets/{id}"), tenant)).await;
+        let (after, _) = send(app, request("GET", &format!("/assets/{id}"), &bearer)).await;
         assert_eq!(after, StatusCode::NOT_FOUND, "a deleted asset is gone");
     }
 
     #[sqlx::test]
-    async fn missing_tenant_header_is_rejected(opts: PgPoolOptions, conn: PgConnectOptions) {
-        let (app, _store, _tenant) = setup(opts, conn).await;
+    async fn missing_bearer_is_rejected(opts: PgPoolOptions, conn: PgConnectOptions) {
+        let (app, _store, _bearer, _tenant) = setup(opts, conn).await;
         let req = Request::builder()
             .uri("/assets")
             .body(Body::empty())
             .expect("build request");
         let (status, _) = send(app, req).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
+        // No token → the `AuthPrincipal` extractor rejects with 401, not 400.
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 }

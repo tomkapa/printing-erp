@@ -22,8 +22,9 @@ CREATE TABLE assets (
     size_bytes      BIGINT       NOT NULL CHECK (size_bytes > 0),
     checksum_sha256 TEXT,
     status          asset_status NOT NULL DEFAULT 'pending',
-    -- Nullable until authentication lands (then the uploading user's id).
-    uploaded_by     UUID                  REFERENCES users (id),
+    -- The authenticated user who created the asset (issue #12). Every insert
+    -- supplies it from the request principal, so it is NOT NULL.
+    uploaded_by     UUID         NOT NULL REFERENCES users (id),
     created_at      TIMESTAMPTZ  NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ  NOT NULL DEFAULT now(),
     UNIQUE (tenant_id, storage_key)

@@ -1,7 +1,7 @@
 //! HTTP router assembly and global middleware.
 
 use super::limits;
-use super::routes::{assets, health, settings, tenant};
+use super::routes::{assets, auth, health, settings, tenant};
 use super::state::AppState;
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
@@ -20,9 +20,14 @@ pub(crate) fn router(state: AppState) -> Router {
     Router::new()
         .route("/health/live", get(health::live))
         .route("/health/ready", get(health::ready))
-        // Pre-auth tenant echo: demonstrates the `TenantScope` extractor
-        // end-to-end (see `http::tenant`). Replaced by authenticated routing
-        // when auth lands.
+        // Authentication (unauthenticated entry points).
+        .route("/auth/login", post(auth::login))
+        .route("/auth/refresh", post(auth::refresh))
+        .route("/auth/logout", post(auth::logout))
+        .route("/auth/password/forgot", post(auth::password_forgot))
+        .route("/auth/password/reset", post(auth::password_reset))
+        // Authenticated tenant echo: resolves the tenant from a verified access
+        // token (`AuthPrincipal`) and reports its RLS-visible user count.
         .route("/tenant/me", get(tenant::me))
         // Asset upload/download. Bytes move out of band via presigned URLs, so
         // these endpoints carry only small JSON metadata.
@@ -30,7 +35,7 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/assets/{id}", get(assets::get_one).delete(assets::delete))
         .route("/assets/{id}/complete", post(assets::complete))
         // Per-tenant business configuration (logo, identity, tax, currency,
-        // default unit). Resolved via the same `TenantScope` extractor.
+        // default unit). Authenticated via the same `AuthPrincipal` extractor.
         .route(
             "/settings",
             get(settings::get_settings).put(settings::put_settings),

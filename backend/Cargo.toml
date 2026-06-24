@@ -21,6 +21,23 @@ tower-http = { version = "0.6", features = ["trace", "timeout", "cors", "request
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "migrate", "macros"] }
 redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
 
+# Authentication & cryptography (issue #12).
+# - jsonwebtoken: HS256 access-token signing/verification. We use only its
+#   signature + claim-deserialization path and validate `exp`/`iat` ourselves
+#   against the injected Clock (CLAUDE.md §11); its heavy transitive `ring` is
+#   already in the tree via rustls.
+# - argon2: OWASP-recommended argon2id password hashing/verification (constant-
+#   time). A memory-hard KDF must never be hand-rolled. Re-exports `password-hash`
+#   as `argon2::password_hash` (PHC string type), so no separate dep is needed.
+# - rand / sha2 / base64: already transitive (via rustls/sqlx); declared direct
+#   for CSPRNG token-secret generation (OsRng), SHA-256 token hashing, and
+#   base64url token encoding respectively. No new crates enter the tree.
+jsonwebtoken = "9"
+argon2 = "0.5"
+rand = "0.8"
+sha2 = "0.10"
+base64 = "0.22"
+
 # Serialization, configuration & secrets.
 serde = { version = "1", features = ["derive"] }
 config = { version = "0.15", default-features = false, features = ["toml"] }

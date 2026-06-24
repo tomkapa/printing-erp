@@ -44,7 +44,13 @@ pub(crate) async fn run(settings: Settings) -> Result<(), ServerError> {
     // Build the object-storage client once at startup (CLAUDE.md §9).
     let store = Arc::new(S3ObjectStore::new(&settings.storage)?);
 
-    let state = AppState::new(db, redis, store, Arc::new(SystemClock));
+    // Built once at startup (CLAUDE.md §9); asserts the JWT secret length. The
+    // reset-token notifier is the dev stub until Notifications (#36) lands.
+    let auth = Arc::new(crate::auth::AuthContext::new(
+        &settings.auth,
+        Arc::new(crate::auth::LoggingNotifier),
+    ));
+    let state = AppState::new(db, redis, store, Arc::new(SystemClock), auth);
     let app = http::router(state);
 
     let address = settings.server.bind_address();

@@ -1,7 +1,9 @@
 //! Shared application state handed to every request handler.
 
+use crate::auth::AuthContext;
 use crate::clock::Clock;
 use crate::storage::ObjectStore;
+use axum::extract::FromRef;
 use redis::aio::ConnectionManager;
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -19,6 +21,7 @@ pub(crate) struct AppState {
     /// real client and the test fake are interchangeable (CLAUDE.md §1, §9).
     pub(crate) store: Arc<dyn ObjectStore>,
     clock: Arc<dyn Clock>,
+    auth: Arc<AuthContext>,
     started_at: Instant,
 }
 
@@ -29,6 +32,7 @@ impl AppState {
         redis: ConnectionManager,
         store: Arc<dyn ObjectStore>,
         clock: Arc<dyn Clock>,
+        auth: Arc<AuthContext>,
     ) -> Self {
         let started_at = clock.now();
         Self {
@@ -36,8 +40,19 @@ impl AppState {
             redis,
             store,
             clock,
+            auth,
             started_at,
         }
+    }
+
+    /// The injected clock, for handlers/flows that stamp or check time (§11).
+    pub(crate) const fn clock(&self) -> &Arc<dyn Clock> {
+        &self.clock
+    }
+
+    /// The authentication context (keys, token lifetimes).
+    pub(crate) const fn auth(&self) -> &Arc<AuthContext> {
+        &self.auth
     }
 
     /// Whole-seconds since the server started, via the injected clock.
@@ -49,6 +64,20 @@ impl AppState {
     }
 }
 
+/// Lets extractors (e.g. `AuthPrincipal`) pull just the auth context from state.
+impl FromRef<AppState> for Arc<AuthContext> {
+    fn from_ref(state: &AppState) -> Self {
+        state.auth.clone()
+    }
+}
+
+/// Lets extractors pull just the clock from state.
+impl FromRef<AppState> for Arc<dyn Clock> {
+    fn from_ref(state: &AppState) -> Self {
+        state.clock.clone()
+    }
+}
+
 impl std::fmt::Debug for AppState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AppState")
@@ -56,6 +85,7 @@ impl std::fmt::Debug for AppState {
             .field("redis", &"ConnectionManager")
             .field("store", &self.store)
             .field("clock", &self.clock)
+            .field("auth", &self.auth)
             .field("started_at", &self.started_at)
             .finish()
     }

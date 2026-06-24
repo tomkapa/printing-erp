@@ -1,13 +1,15 @@
-# cargo-audit policy (CLAUDE.md §3, §8).
+# cargo-audit policy (CLAUDE.md §3, §8). Run `cargo audit` from `backend/`.
 #
-# Every advisory below is transitive through `aws-sdk-s3` (the official AWS SDK,
-# justified in Cargo.toml) and is not reachable/exploitable in our usage. Each is
-# triaged with a rationale; remove an entry once the SDK bumps the offending dep.
+# `cargo audit` reads Cargo.lock and flags advisories whether or not the crate is
+# actually compiled, so every suppression below is triaged with a rationale.
+# Remove an entry once the upstream dependency ships a fix.
 [advisories]
 ignore = [
     # --- aws-smithy-http-client's default TLS connector (hyper-rustls 0.24 /
-    # rustls 0.21). Production reaches R2/S3 through the SDK's maintained client;
-    # local MinIO is plain HTTP. Clears when the SDK updates its connector. ---
+    # rustls 0.21), pulled in transitively by `aws-sdk-s3` (justified in
+    # Cargo.toml). Production reaches R2/S3 through the SDK's maintained client;
+    # local MinIO is plain HTTP. Clears when the SDK updates its connector. These
+    # crates ARE compiled, so the same IDs are mirrored in deny.toml. ---
     "RUSTSEC-2026-0104", # rustls-webpki: reachable panic parsing a CRL
     "RUSTSEC-2026-0098", # rustls-webpki: URI-name constraints accepted
     "RUSTSEC-2026-0099", # rustls-webpki: wildcard name constraints accepted
@@ -19,6 +21,12 @@ ignore = [
                          # only formats signing timestamps, never parses attacker input.
     "RUSTSEC-2026-0002", # lru: IterMut unsoundness — the SDK's internal endpoint cache.
 
-    # --- not in our normal dependency graph (`cargo tree -i rsa` is empty) ---
-    "RUSTSEC-2023-0071", # rsa: Marvin timing side-channel.
+    # RUSTSEC-2023-0071 — Marvin timing side-channel in `rsa`. The crate is
+    # resolved into Cargo.lock via `sqlx-macros-core`'s optional `sqlx-mysql`
+    # dependency, but only the Postgres driver is enabled, so `rsa` is never
+    # compiled into the build (`cargo tree -i rsa` reports nothing). No fixed
+    # release exists. We use Postgres exclusively (backend/src/db.rs), so there is
+    # no exposure. deny.toml is graph-aware and never sees `rsa`, so it carries no
+    # matching ignore. Re-evaluate when a patched `rsa` ships.
+    "RUSTSEC-2023-0071",
 ]

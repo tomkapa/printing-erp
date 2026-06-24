@@ -9,7 +9,7 @@
 use crate::assets::error::AssetError;
 use crate::assets::limits;
 use crate::assets::model::{Asset, ByteSize, ContentType, FileName, Sha256Hex, StorageKey};
-use crate::domain::{AssetId, TenantId};
+use crate::domain::{AssetId, TenantId, UserId};
 use sqlx::PgConnection;
 
 /// Inserts a freshly-created asset in the `pending` state.
@@ -21,16 +21,19 @@ pub(crate) async fn insert_pending(
     conn: &mut PgConnection,
     tenant: TenantId,
     asset: AssetId,
-    storage_key: &StorageKey,
     original_name: &FileName,
     content_type: ContentType,
     size: ByteSize,
+    uploaded_by: UserId,
 ) -> Result<(), AssetError> {
     assert!(size.get() > 0, "ByteSize invariant: strictly positive");
+    // The storage key is fully derived from (tenant, asset), so deriving it here
+    // guarantees the stored key matches the one the handler presigned.
+    let storage_key = StorageKey::new(tenant, asset);
     let result = sqlx::query(
         "INSERT INTO assets \
-         (id, tenant_id, storage_key, original_name, content_type, size_bytes) \
-         VALUES ($1, $2, $3, $4, $5, $6)",
+         (id, tenant_id, storage_key, original_name, content_type, size_bytes, uploaded_by) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7)",
     )
     .bind(asset.as_uuid())
     .bind(tenant.as_uuid())
@@ -38,6 +41,7 @@ pub(crate) async fn insert_pending(
     .bind(original_name.as_str())
     .bind(content_type.as_str())
     .bind(size.get())
+    .bind(uploaded_by.as_uuid())
     .execute(conn)
     .await?;
     assert_eq!(
@@ -177,7 +181,8 @@ mod tests {
         AssetStatus, ByteSize, ContentType, FileName, Sha256Hex, StorageKey,
     };
     use crate::db::begin_tenant_tx;
-    use crate::domain::{AssetId, TenantId};
+    use crate::domain::{AssetId, Role, TenantId};
+    use crate::testsupport::seed_user;
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
     use sqlx::{Connection as _, PgConnection, PgPool};
     use uuid::Uuid;
@@ -214,10 +219,21 @@ mod tests {
             .expect("seed tenant");
     }
 
-    /// Inserts one pending asset inside the tenant context and commits.
+    /// Inserts one pending asset inside the tenant context and commits. Seeds a
+    /// user first so the `uploaded_by` foreign key is satisfied.
     async fn seed_asset(pool: &PgPool, tenant: TenantId) -> AssetId {
         let asset = new_asset();
-        let key = StorageKey::new(tenant, asset);
+        // Email is unique per call (derived from the fresh asset id) so seeding
+        // several assets for one tenant does not collide on (tenant, email).
+        let uploader = seed_user(
+            pool,
+            tenant,
+            &format!("u-{}@acme.test", asset.as_uuid()),
+            Role::Admin,
+            "x",
+            true,
+        )
+        .await;
         let mut tx = begin_tenant_tx(pool, tenant)
             .await
             .expect("begin tenant tx");
@@ -225,10 +241,10 @@ mod tests {
             &mut tx,
             tenant,
             asset,
-            &key,
             &name(),
             ContentType::Pdf,
             size(),
+            uploader,
         )
         .await
         .expect("insert pending asset");

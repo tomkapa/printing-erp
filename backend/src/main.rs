@@ -13,6 +13,7 @@
 
 mod app;
 mod assets;
+mod auth;
 mod clock;
 mod config;
 mod db;
@@ -20,6 +21,8 @@ mod domain;
 mod http;
 mod storage;
 mod telemetry;
+#[cfg(test)]
+mod testsupport;
 
 use anyhow::Context as _;
 

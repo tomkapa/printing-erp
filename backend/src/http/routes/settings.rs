@@ -2,12 +2,10 @@
 //!
 //! `GET /settings` returns the requesting tenant's business configuration;
 //! `PUT /settings` creates or replaces it (an idempotent upsert — SPEC.md
-//! §Retry and idempotency). Both resolve the tenant via [`TenantScope`] and run
-//! inside a tenant-scoped transaction ([`db::begin_tenant_tx`]), so Row-Level
-//! Security keys every read and write to the caller's tenant.
-//!
-//! The same pre-auth caveat as [`crate::http::tenant`] applies: the tenant is
-//! read from the unauthenticated `X-Tenant-Id` header until auth lands.
+//! §Retry and idempotency). Both resolve the tenant from the authenticated
+//! [`AuthPrincipal`] and run inside a tenant-scoped transaction
+//! ([`db::begin_tenant_tx`]), so Row-Level Security keys every read and write to
+//! the caller's tenant.
 
 use crate::assets::{self, Asset, AssetError, AssetStatus};
 use crate::db;
@@ -15,9 +13,9 @@ use crate::domain::{
     Address, AssetId, BusinessSettings, BusinessSettingsRow, EmailAddress, LogoRef, Phone, TaxCode,
     TenantId,
 };
+use crate::http::AuthPrincipal;
 use crate::http::limits;
 use crate::http::state::AppState;
-use crate::http::tenant::TenantScope;
 use crate::storage::{self, PresignedUrl};
 use axum::Json;
 use axum::extract::State;
@@ -98,31 +96,34 @@ impl IntoResponse for SettingsError {
 /// `GET /settings` — the tenant's business configuration, or `404` if unset.
 pub(crate) async fn get_settings(
     State(state): State<AppState>,
-    TenantScope(tenant): TenantScope,
+    principal: AuthPrincipal,
 ) -> Result<Json<SettingsResponse>, SettingsError> {
-    let row = timeout(limits::SETTINGS_QUERY_TIMEOUT, load_row(&state.db, tenant))
-        .await
-        .map_err(|_| SettingsError::Timeout)??
-        .ok_or(SettingsError::NotFound)?;
+    let row = timeout(
+        limits::SETTINGS_QUERY_TIMEOUT,
+        load_row(&state.db, principal.tenant_id),
+    )
+    .await
+    .map_err(|_| SettingsError::Timeout)??
+    .ok_or(SettingsError::NotFound)?;
     let mut response = SettingsResponse::try_from(row)?;
-    attach_logo(&state, tenant, &mut response).await;
+    attach_logo(&state, principal.tenant_id, &mut response).await;
     Ok(Json(response))
 }
 
 /// `PUT /settings` — create or replace the tenant's business configuration.
 pub(crate) async fn put_settings(
     State(state): State<AppState>,
-    TenantScope(tenant): TenantScope,
+    principal: AuthPrincipal,
     Json(input): Json<BusinessSettings>,
 ) -> Result<Json<SettingsResponse>, SettingsError> {
     let row = timeout(
         limits::SETTINGS_QUERY_TIMEOUT,
-        upsert_row(&state.db, tenant, &input),
+        upsert_row(&state.db, principal.tenant_id, &input),
     )
     .await
     .map_err(|_| SettingsError::Timeout)??;
     let mut response = SettingsResponse::try_from(row)?;
-    attach_logo(&state, tenant, &mut response).await;
+    attach_logo(&state, principal.tenant_id, &mut response).await;
     Ok(Json(response))
 }
 
@@ -571,18 +572,16 @@ mod boundary_tests {
 mod handler_tests {
     //! HTTP-handler tests for logo resolution (issue #16 integration).
     //!
-    //! Exercises `GET /settings` resolving a stored asset ID to a presigned
-    //! download URL. Uses the in-memory object store — no Docker required — plus
-    //! real Postgres (via `#[sqlx::test]`) and real Redis.
+    //! Exercises `GET`/`PUT /settings` resolving a stored asset ID to a presigned
+    //! download URL. Requests carry a real Bearer access token; the in-memory
+    //! object store stands in for S3 (no Docker), over real Postgres and Redis.
 
     use crate::assets::repo as assets_repo;
-    use crate::assets::{ByteSize, ContentType, FileName, StorageKey};
-    use crate::clock::SystemClock;
-    use crate::db;
-    use crate::db::test_support::{app_pool, seed_tenant};
-    use crate::domain::{AssetId, TenantId};
-    use crate::http::state::AppState;
+    use crate::assets::{ByteSize, ContentType, FileName};
+    use crate::domain::{AssetId, Role, TenantId, UserId};
     use crate::storage::InMemoryObjectStore;
+    use crate::testsupport;
+    use crate::{db, http::AppState};
     use axum::Router;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
@@ -591,30 +590,37 @@ mod handler_tests {
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
     use std::sync::Arc;
     use tower::ServiceExt as _;
-    use uuid::Uuid;
 
-    /// Returns `(router, store, tenant, erp_app_pool)`.
+    /// Returns `(router, bearer, tenant, erp_app_pool)`. The token authenticates
+    /// the seeded admin user; the pool lets a test seed the logo asset directly.
     async fn setup(
         opts: PgPoolOptions,
         conn: PgConnectOptions,
-    ) -> (Router, InMemoryObjectStore, TenantId, PgPool) {
-        let pool = app_pool(opts, conn).await;
-        let tenant = TenantId::try_from(Uuid::new_v4()).expect("non-nil");
-        seed_tenant(&pool, tenant, "test-tenant").await;
-
-        let client = redis::Client::open("redis://localhost:6379").expect("redis url");
-        let redis = redis::aio::ConnectionManager::new(client)
-            .await
-            .expect("redis connect");
+    ) -> (Router, String, TenantId, PgPool) {
+        let pool = testsupport::app_pool(opts, conn).await;
+        let tenant = testsupport::new_tenant();
+        testsupport::seed_tenant(&pool, tenant, "test-tenant").await;
+        let user =
+            testsupport::seed_user(&pool, tenant, "u@acme.test", Role::Admin, "x", true).await;
 
         let store = InMemoryObjectStore::default();
-        let state = AppState::new(
+        let state: AppState = testsupport::app_state_with_store(
             pool.clone(),
-            redis,
-            Arc::new(store.clone()),
-            Arc::new(SystemClock),
-        );
-        (crate::http::router(state), store, tenant, pool)
+            Arc::new(store),
+            testsupport::test_clock(),
+            testsupport::auth_context(),
+        )
+        .await;
+        let token = state
+            .auth()
+            .issue_access(user, tenant, Role::Admin, testsupport::epoch())
+            .expect("issue access token");
+        (
+            crate::http::router(state),
+            format!("Bearer {token}"),
+            tenant,
+            pool,
+        )
     }
 
     async fn send(app: Router, req: Request<Body>) -> (StatusCode, serde_json::Value) {
@@ -631,17 +637,25 @@ mod handler_tests {
     }
 
     /// Seeds a ready logo asset directly via the repo (bypasses HTTP; this is
-    /// setup, not the behavior under test). Returns the asset id as a UUID string.
-    async fn seed_ready_logo(pool: &PgPool, tenant: TenantId) -> String {
-        let asset = AssetId::try_from(Uuid::new_v4()).expect("non-nil");
-        let key = StorageKey::new(tenant, asset);
+    /// setup, not the behavior under test). `uploader` satisfies the asset's
+    /// `uploaded_by` foreign key. Returns the asset id as a UUID string.
+    async fn seed_ready_logo(pool: &PgPool, tenant: TenantId, uploader: UserId) -> String {
+        let asset = AssetId::try_from(uuid::Uuid::new_v4()).expect("non-nil");
         let name = FileName::try_from("logo.png").expect("valid name");
         let size = ByteSize::try_from(1024_i64).expect("positive");
 
         let mut tx = db::begin_tenant_tx(pool, tenant).await.expect("begin tx");
-        assets_repo::insert_pending(&mut tx, tenant, asset, &key, &name, ContentType::Png, size)
-            .await
-            .expect("insert pending");
+        assets_repo::insert_pending(
+            &mut tx,
+            tenant,
+            asset,
+            &name,
+            ContentType::Png,
+            size,
+            uploader,
+        )
+        .await
+        .expect("insert pending");
         assets_repo::mark_ready(&mut tx, asset, None)
             .await
             .expect("mark ready");
@@ -650,13 +664,44 @@ mod handler_tests {
         asset.as_uuid().to_string()
     }
 
+    /// Resolves the seeded tenant's single user id (the uploader for the logo).
+    async fn sole_user(pool: &PgPool, tenant: TenantId) -> UserId {
+        let mut tx = db::begin_tenant_tx(pool, tenant).await.expect("begin tx");
+        let id: uuid::Uuid = sqlx::query_scalar("SELECT id FROM users LIMIT 1")
+            .fetch_one(&mut *tx)
+            .await
+            .expect("seeded user exists");
+        tx.commit().await.expect("commit");
+        UserId::try_from(id).expect("non-nil user id")
+    }
+
+    fn put(bearer: &str, body: &serde_json::Value) -> Request<Body> {
+        Request::builder()
+            .method("PUT")
+            .uri("/settings")
+            .header("authorization", bearer)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("build PUT")
+    }
+
+    fn get(bearer: &str) -> Request<Body> {
+        Request::builder()
+            .method("GET")
+            .uri("/settings")
+            .header("authorization", bearer)
+            .body(Body::empty())
+            .expect("build GET")
+    }
+
     #[sqlx::test]
     async fn get_settings_resolves_logo_to_presigned_url(
         opts: PgPoolOptions,
         conn: PgConnectOptions,
     ) {
-        let (app, _store, tenant, pool) = setup(opts, conn).await;
-        let asset_id = seed_ready_logo(&pool, tenant).await;
+        let (app, bearer, tenant, pool) = setup(opts, conn).await;
+        let uploader = sole_user(&pool, tenant).await;
+        let asset_id = seed_ready_logo(&pool, tenant, uploader).await;
 
         // PUT /settings with the asset UUID as logo_url.
         let put_body = serde_json::json!({
@@ -666,24 +711,11 @@ mod handler_tests {
             "default_unit": "tờ",
             "logo_url": asset_id,
         });
-        let put_req = Request::builder()
-            .method("PUT")
-            .uri("/settings")
-            .header("x-tenant-id", tenant.as_uuid().to_string())
-            .header("content-type", "application/json")
-            .body(Body::from(put_body.to_string()))
-            .expect("build PUT");
-        let (put_status, _) = send(app.clone(), put_req).await;
+        let (put_status, _) = send(app.clone(), put(&bearer, &put_body)).await;
         assert_eq!(put_status, StatusCode::OK, "PUT /settings succeeds");
 
         // GET /settings must include logo_download_url resolved to a presigned URL.
-        let get_req = Request::builder()
-            .method("GET")
-            .uri("/settings")
-            .header("x-tenant-id", tenant.as_uuid().to_string())
-            .body(Body::empty())
-            .expect("build GET");
-        let (get_status, body) = send(app, get_req).await;
+        let (get_status, body) = send(app, get(&bearer)).await;
         assert_eq!(get_status, StatusCode::OK, "GET /settings succeeds");
         assert_eq!(
             body["logo_url"], asset_id,
@@ -702,7 +734,7 @@ mod handler_tests {
         opts: PgPoolOptions,
         conn: PgConnectOptions,
     ) {
-        let (app, _store, tenant, _pool) = setup(opts, conn).await;
+        let (app, bearer, _tenant, _pool) = setup(opts, conn).await;
 
         let put_body = serde_json::json!({
             "legal_name": "No Logo Co",
@@ -710,22 +742,9 @@ mod handler_tests {
             "tax_rate_bps": 0,
             "default_unit": "tờ",
         });
-        let put_req = Request::builder()
-            .method("PUT")
-            .uri("/settings")
-            .header("x-tenant-id", tenant.as_uuid().to_string())
-            .header("content-type", "application/json")
-            .body(Body::from(put_body.to_string()))
-            .expect("build PUT");
-        send(app.clone(), put_req).await;
+        send(app.clone(), put(&bearer, &put_body)).await;
 
-        let get_req = Request::builder()
-            .method("GET")
-            .uri("/settings")
-            .header("x-tenant-id", tenant.as_uuid().to_string())
-            .body(Body::empty())
-            .expect("build GET");
-        let (status, body) = send(app, get_req).await;
+        let (status, body) = send(app, get(&bearer)).await;
         assert_eq!(status, StatusCode::OK);
         assert!(
             body.get("logo_download_url").is_none(),

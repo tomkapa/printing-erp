@@ -29,6 +29,8 @@ pub(crate) struct Settings {
     pub(crate) redis: RedisSettings,
     /// S3-compatible object storage (S3 / Cloudflare R2 / MinIO).
     pub(crate) storage: StorageSettings,
+    /// Authentication: JWT signing + token lifetimes.
+    pub(crate) auth: AuthSettings,
     /// Tracing / OpenTelemetry export.
     #[serde(default)]
     pub(crate) telemetry: TelemetrySettings,
@@ -124,6 +126,48 @@ pub(crate) struct StorageSettings {
     pub(crate) force_path_style: bool,
 }
 
+/// Authentication settings: the HS256 signing secret and token lifetimes.
+///
+/// Lifetimes are seconds in config (TOML/env are stringly typed); the
+/// `*_ttl` accessors hand back [`Duration`]s. The secret is a
+/// [`SecretString`] so it never appears in logs or `Debug`.
+#[derive(Debug, Deserialize)]
+pub(crate) struct AuthSettings {
+    /// HS256 signing/verification key. Its length is asserted (≥256 bits) when
+    /// the auth context is built, so a too-short secret fails fast at startup.
+    pub(crate) jwt_secret: SecretString,
+    /// Access-token lifetime in seconds (default 900 = 15 min): short, since the
+    /// stateless access token cannot be revoked before it expires.
+    #[serde(default = "default_access_ttl_secs")]
+    pub(crate) access_ttl_secs: u64,
+    /// Refresh-token lifetime in seconds (default 2_592_000 = 30 days).
+    #[serde(default = "default_refresh_ttl_secs")]
+    pub(crate) refresh_ttl_secs: u64,
+    /// Password-reset-token lifetime in seconds (default 3600 = 1 hour).
+    #[serde(default = "default_reset_ttl_secs")]
+    pub(crate) reset_ttl_secs: u64,
+    /// `iss` claim stamped on, and required of, every access token.
+    #[serde(default = "default_issuer")]
+    pub(crate) issuer: String,
+}
+
+impl AuthSettings {
+    /// Access-token lifetime as a [`Duration`].
+    pub(crate) const fn access_ttl(&self) -> Duration {
+        Duration::from_secs(self.access_ttl_secs)
+    }
+
+    /// Refresh-token lifetime as a [`Duration`].
+    pub(crate) const fn refresh_ttl(&self) -> Duration {
+        Duration::from_secs(self.refresh_ttl_secs)
+    }
+
+    /// Reset-token lifetime as a [`Duration`].
+    pub(crate) const fn reset_ttl(&self) -> Duration {
+        Duration::from_secs(self.reset_ttl_secs)
+    }
+}
+
 /// Tracing / OpenTelemetry settings.
 #[derive(Debug, Deserialize)]
 pub(crate) struct TelemetrySettings {
@@ -181,6 +225,22 @@ const fn default_max_connections() -> u32 {
 
 const fn default_acquire_timeout_secs() -> u64 {
     5
+}
+
+const fn default_access_ttl_secs() -> u64 {
+    900
+}
+
+const fn default_refresh_ttl_secs() -> u64 {
+    2_592_000
+}
+
+const fn default_reset_ttl_secs() -> u64 {
+    3_600
+}
+
+fn default_issuer() -> String {
+    "printing-erp".to_owned()
 }
 
 fn default_service_name() -> String {
@@ -274,5 +334,22 @@ mod tests {
             "default addressing is virtual-hosted, as AWS S3 expects"
         );
         assert_eq!(storage.bucket, "erp-assets");
+    }
+
+    #[test]
+    fn auth_ttls_convert_seconds_to_durations() {
+        use super::AuthSettings;
+        use std::time::Duration;
+
+        let auth = AuthSettings {
+            jwt_secret: SecretString::from("x".repeat(32)),
+            access_ttl_secs: 900,
+            refresh_ttl_secs: 2_592_000,
+            reset_ttl_secs: 3_600,
+            issuer: "printing-erp".to_owned(),
+        };
+        assert_eq!(auth.access_ttl(), Duration::from_secs(900));
+        assert_eq!(auth.refresh_ttl(), Duration::from_secs(2_592_000));
+        assert_eq!(auth.reset_ttl(), Duration::from_secs(3_600));
     }
 }
