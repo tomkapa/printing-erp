@@ -35,7 +35,14 @@ pub(crate) mod test_support {
     use crate::domain::TenantId;
     use sqlx::PgPool;
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+    use std::time::Duration;
+    use tokio::time::timeout;
     use uuid::Uuid;
+
+    /// Upper bound on any single test-DB operation. Generous for a loaded CI
+    /// runner, but bounded so a slow or wedged database fails the test fast
+    /// instead of hanging the whole `#[sqlx::test]` cohort.
+    const TEST_DB_TIMEOUT: Duration = Duration::from_secs(10);
 
     /// The embedded migration set, for per-table reversibility checks.
     pub(crate) fn migrator() -> &'static sqlx::migrate::Migrator {
@@ -49,21 +56,28 @@ pub(crate) mod test_support {
 
     /// Connects a pool as the least-privilege `erp_app` role to the test DB. The
     /// admin pool `#[sqlx::test]` provides is a superuser and would bypass RLS,
-    /// masking any regression.
+    /// masking any regression. Bounded by [`TEST_DB_TIMEOUT`].
     pub(crate) async fn app_pool(opts: PgPoolOptions, conn: PgConnectOptions) -> PgPool {
-        opts.connect_with(conn.username("erp_app").password("erp_app"))
-            .await
-            .expect("connect to test database as erp_app")
+        timeout(
+            TEST_DB_TIMEOUT,
+            opts.connect_with(conn.username("erp_app").password("erp_app")),
+        )
+        .await
+        .expect("connect to test database within timeout")
+        .expect("connect to test database as erp_app")
     }
 
     /// Seeds a tenant directly (the root `tenants` table is not under RLS).
+    /// Bounded by [`TEST_DB_TIMEOUT`].
     pub(crate) async fn seed_tenant(pool: &PgPool, tenant: TenantId, slug: &str) {
-        sqlx::query("INSERT INTO tenants (id, name, slug) VALUES ($1, $2, $3)")
+        let insert = sqlx::query("INSERT INTO tenants (id, name, slug) VALUES ($1, $2, $3)")
             .bind(tenant.as_uuid())
             .bind("Acme Print Co")
             .bind(slug)
-            .execute(pool)
+            .execute(pool);
+        timeout(TEST_DB_TIMEOUT, insert)
             .await
+            .expect("seed tenant within timeout")
             .expect("seed tenant");
     }
 }
