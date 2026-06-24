@@ -1,7 +1,7 @@
 //! HTTP router assembly and global middleware.
 
 use super::limits;
-use super::routes::{health, tenant};
+use super::routes::{health, settings, tenant};
 use super::state::AppState;
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
@@ -24,6 +24,12 @@ pub(crate) fn router(state: AppState) -> Router {
         // end-to-end (see `http::tenant`). Replaced by authenticated routing
         // when auth lands.
         .route("/tenant/me", get(tenant::me))
+        // Per-tenant business configuration (logo, identity, tax, currency,
+        // default unit). Resolved via the same `TenantScope` extractor.
+        .route(
+            "/settings",
+            get(settings::get_settings).put(settings::put_settings),
+        )
         .layer(TraceLayer::new_for_http())
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,

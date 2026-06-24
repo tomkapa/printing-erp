@@ -18,6 +18,30 @@ pub(crate) enum DomainError {
     /// a real row and almost always signals an uninitialized value.
     #[error("nil identifier: {0}")]
     Nil(&'static str),
+
+    /// A required text value was empty (or whitespace-only) where the invariant
+    /// demands at least one meaningful character.
+    #[error("empty value: {0}")]
+    Empty(&'static str),
+
+    /// A text value exceeded its byte cap (CLAUDE.md §5). The field is named so
+    /// callers can report *which* limit was hit without echoing the raw value.
+    #[error("value too long: {field} exceeds {max} bytes")]
+    TooLong {
+        /// Which field's cap was exceeded.
+        field: &'static str,
+        /// The exclusive upper bound, in bytes.
+        max: usize,
+    },
+
+    /// A numeric value fell outside its permitted range.
+    #[error("out of range: {0}")]
+    OutOfRange(&'static str),
+
+    /// A value was well-formed text but failed a format/charset rule (e.g. a
+    /// currency code that is not three uppercase ASCII letters).
+    #[error("invalid value: {0}")]
+    Invalid(&'static str),
 }
 
 /// Identifier of a [`Tenant`](crate) — the root of all tenant-scoped data.

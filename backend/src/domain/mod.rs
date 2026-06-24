@@ -9,5 +9,10 @@
 //! the natural seed of the `erp-domain` crate referenced by `SPEC.md`.
 
 mod ids;
+mod limits;
+mod settings;
 
 pub(crate) use ids::{DomainError, TenantId};
+pub(crate) use settings::{
+    Address, BusinessSettings, BusinessSettingsRow, EmailAddress, LogoRef, Phone, TaxCode,
+};
