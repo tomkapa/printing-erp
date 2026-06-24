@@ -19,41 +19,20 @@ CREATE TABLE business_settings (
     email        TEXT,
     logo_url     TEXT,
     -- ISO 4217 alphabetic code; defaults to Vietnamese dong (the primary market).
-    currency     CHAR(3)     NOT NULL DEFAULT 'VND',
+    -- Plain TEXT, not CHAR(3): the 3-uppercase-letter rule is enforced by the
+    -- `CurrencyCode` newtype, and TEXT avoids blank-padding on read-back.
+    currency     TEXT        NOT NULL DEFAULT 'VND',
     -- VAT rate in basis points (1000 = 10%). Stored as an integer so rate
     -- arithmetic never touches floating point (CLAUDE.md §7 `float_cmp`); INTEGER
     -- (not SMALLINT) so the `u16 -> i32` bind is the infallible `i32::from`.
     tax_rate_bps INTEGER     NOT NULL DEFAULT 1000,
     default_unit TEXT        NOT NULL,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-
-    -- Defense-in-depth: these CHECKs mirror the domain newtype constructors in
-    -- `backend/src/domain/settings.rs` (`bounded()`, `CurrencyCode`, `TaxRateBps`)
-    -- at the storage layer, so a write that bypasses the application path still
-    -- cannot persist a value the typed read would later reject (which would
-    -- surface as a 500 on `GET /settings`). Text caps use `octet_length` (bytes)
-    -- to match Rust's `str::len`, and `btrim(...) <> ''` rejects blank /
-    -- whitespace-only values exactly as `bounded()` does. Nullable columns admit
-    -- NULL (absent) but reject an empty/over-cap value when present.
-    CONSTRAINT business_settings_tax_rate_bps_range
-        CHECK (tax_rate_bps BETWEEN 0 AND 10000),
-    CONSTRAINT business_settings_currency_format
-        CHECK (currency ~ '^[A-Z]{3}$'),
-    CONSTRAINT business_settings_legal_name_valid
-        CHECK (btrim(legal_name) <> '' AND octet_length(legal_name) <= 200),
-    CONSTRAINT business_settings_default_unit_valid
-        CHECK (btrim(default_unit) <> '' AND octet_length(default_unit) <= 32),
-    CONSTRAINT business_settings_tax_code_valid
-        CHECK (tax_code IS NULL OR (btrim(tax_code) <> '' AND octet_length(tax_code) <= 20)),
-    CONSTRAINT business_settings_address_valid
-        CHECK (address IS NULL OR (btrim(address) <> '' AND octet_length(address) <= 300)),
-    CONSTRAINT business_settings_phone_valid
-        CHECK (phone IS NULL OR (btrim(phone) <> '' AND octet_length(phone) <= 32)),
-    CONSTRAINT business_settings_email_valid
-        CHECK (email IS NULL OR (btrim(email) <> '' AND octet_length(email) <= 254)),
-    CONSTRAINT business_settings_logo_url_valid
-        CHECK (logo_url IS NULL OR (btrim(logo_url) <> '' AND octet_length(logo_url) <= 512))
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+    -- No value CHECK constraints by design: range/length/format/blank rules live
+    -- only in the domain newtype constructors (`backend/src/domain/settings.rs`),
+    -- so a limit or rule change is a one-place code edit, not a schema migration.
+    -- The DB keeps only structural guarantees (PK, FK, NOT NULL, RLS below).
 );
 
 -- Row-Level Security backstop, identical in shape to `users` (migration
