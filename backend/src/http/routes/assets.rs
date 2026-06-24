@@ -164,7 +164,12 @@ pub(crate) async fn list(
     Query(query): Query<ListQuery>,
 ) -> Result<Json<Vec<AssetView>>, AssetError> {
     let limit = clamp_limit(query.limit);
-    let offset = query.offset.unwrap_or(0).max(0);
+    // Clamp the offset into `0..=MAX_ASSETS_OFFSET` so a client cannot force an
+    // unbounded `OFFSET` scan (CLAUDE.md §5: every batch/scan is bounded).
+    let offset = query
+        .offset
+        .unwrap_or(0)
+        .clamp(0, asset_limits::MAX_ASSETS_OFFSET);
 
     let work = async {
         let mut tx = db::begin_tenant_tx(&state.db, tenant).await?;

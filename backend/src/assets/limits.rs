@@ -27,3 +27,9 @@ pub(crate) const MAX_ASSETS_PER_PAGE: i64 = 100;
 
 /// Default page size when the caller does not specify one.
 pub(crate) const DEFAULT_ASSETS_PER_PAGE: i64 = 50;
+
+/// Largest accepted list offset (CLAUDE.md §5: every batch/scan is bounded). At
+/// 100 rows/page this is 1,000 pages deep — far past any realistic browse of a
+/// single tenant's assets, while stopping a client from forcing Postgres to skip
+/// an unbounded prefix via a near-`i64::MAX` `OFFSET`.
+pub(crate) const MAX_ASSETS_OFFSET: i64 = 100 * MAX_ASSETS_PER_PAGE;

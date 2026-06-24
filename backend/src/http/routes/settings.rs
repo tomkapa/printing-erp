@@ -9,7 +9,7 @@
 //! The same pre-auth caveat as [`crate::http::tenant`] applies: the tenant is
 //! read from the unauthenticated `X-Tenant-Id` header until auth lands.
 
-use crate::assets::{self, AssetStatus};
+use crate::assets::{self, Asset, AssetError, AssetStatus};
 use crate::db;
 use crate::domain::{
     Address, AssetId, BusinessSettings, BusinessSettingsRow, EmailAddress, LogoRef, Phone, TaxCode,
@@ -105,9 +105,7 @@ pub(crate) async fn get_settings(
         .map_err(|_| SettingsError::Timeout)??
         .ok_or(SettingsError::NotFound)?;
     let mut response = SettingsResponse::try_from(row)?;
-    if let Some(ref logo) = response.settings.logo_url {
-        response.logo_download_url = resolve_logo(&state, tenant, logo).await;
-    }
+    attach_logo(&state, tenant, &mut response).await;
     Ok(Json(response))
 }
 
@@ -124,10 +122,16 @@ pub(crate) async fn put_settings(
     .await
     .map_err(|_| SettingsError::Timeout)??;
     let mut response = SettingsResponse::try_from(row)?;
-    if let Some(ref logo) = response.settings.logo_url {
-        response.logo_download_url = resolve_logo(&state, tenant, logo).await;
-    }
+    attach_logo(&state, tenant, &mut response).await;
     Ok(Json(response))
+}
+
+/// Resolves and attaches a presigned download URL for the response's logo, if
+/// one is set. Shared by `GET` and `PUT` so the resolution policy lives once.
+async fn attach_logo(state: &AppState, tenant: TenantId, response: &mut SettingsResponse) {
+    if let Some(ref logo) = response.settings.logo_url {
+        response.logo_download_url = resolve_logo(state, tenant, logo).await;
+    }
 }
 
 /// Attempts to resolve the stored logo reference to a fresh presigned GET URL.
@@ -137,20 +141,51 @@ pub(crate) async fn put_settings(
 /// stored value is a valid UUID that points to a `ready` asset, a presigned
 /// download URL is returned so the frontend can display the logo inline.
 ///
-/// All failures degrade silently to `None`: an unresolvable logo must not
-/// break the settings response.
+/// Resolution never fails the settings response: a logo that is unset, not a
+/// UUID, or still `pending` yields `None` silently, while a genuine
+/// infrastructure failure (DB, storage, timeout) yields `None` *and* is logged
+/// so the outage is observable (CLAUDE.md §2) rather than indistinguishable
+/// from "no logo set". Every I/O await is bounded (CLAUDE.md §5).
 async fn resolve_logo(
     state: &AppState,
     tenant: TenantId,
     logo_ref: &LogoRef,
 ) -> Option<PresignedUrl> {
+    // A logo_url that is not a UUID is a legacy/free-form reference we cannot
+    // presign — benign, not an error.
     let asset_id = AssetId::try_from(logo_ref.as_str()).ok()?;
-    let mut tx = db::begin_tenant_tx(&state.db, tenant).await.ok()?;
-    let asset = assets::repo::get(&mut tx, tenant, asset_id).await.ok()?;
+
+    // Fetch the asset in a bounded tenant transaction, committing before the
+    // presign so the pooled connection is released promptly.
+    let fetch = async {
+        let mut tx = db::begin_tenant_tx(&state.db, tenant).await?;
+        let asset = assets::repo::get(&mut tx, tenant, asset_id).await?;
+        tx.commit().await?;
+        Ok::<Asset, AssetError>(asset)
+    };
+    let asset = match timeout(limits::SETTINGS_QUERY_TIMEOUT, fetch).await {
+        Ok(Ok(asset)) => asset,
+        // The reference points at no live asset — benign.
+        Ok(Err(AssetError::NotFound)) => return None,
+        Ok(Err(error)) => {
+            tracing::warn!(error = ?error, event = "settings.logo.resolve_failed");
+            return None;
+        }
+        Err(_) => {
+            tracing::warn!(event = "settings.logo.resolve_timed_out");
+            return None;
+        }
+    };
+    assert_eq!(
+        asset.id, asset_id,
+        "repo::get must return the asset that was requested"
+    );
     if !matches!(asset.status, AssetStatus::Ready) {
+        // Upload not yet completed — render nothing, but it is not a failure.
         return None;
     }
-    timeout(
+
+    match timeout(
         storage::limits::STORAGE_OP_TIMEOUT,
         state.store.presign_get(
             &asset.storage_key,
@@ -159,8 +194,17 @@ async fn resolve_logo(
         ),
     )
     .await
-    .ok()?
-    .ok()
+    {
+        Ok(Ok(url)) => Some(url),
+        Ok(Err(error)) => {
+            tracing::warn!(error = ?error, event = "settings.logo.presign_failed");
+            None
+        }
+        Err(_) => {
+            tracing::warn!(event = "settings.logo.presign_timed_out");
+            None
+        }
+    }
 }
 
 /// Reads the tenant's settings row inside its RLS context (`None` if unset).

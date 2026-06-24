@@ -68,6 +68,48 @@ impl S3ObjectStore {
     }
 }
 
+/// Builds an RFC 6266 `Content-Disposition` value carrying `name`.
+///
+/// A bare `filename=` must be ASCII, so we emit an ASCII-sanitized fallback for
+/// legacy agents *and* an RFC 5987 `filename*=UTF-8''…` extension that preserves
+/// the exact name — print shops routinely upload Vietnamese/accented filenames,
+/// and a raw multi-byte `filename` would be mangled by the client.
+fn content_disposition(name: &str) -> String {
+    let ascii: String = name
+        .chars()
+        .filter(|c| c.is_ascii() && *c != '"' && *c != '\\')
+        .collect();
+    let encoded = rfc5987_encode(name);
+    format!("attachment; filename=\"{ascii}\"; filename*=UTF-8''{encoded}")
+}
+
+/// Percent-encodes `value` per RFC 5987 `attr-char`: bytes outside the
+/// unreserved set become `%XX`. Suitable for a `filename*` parameter value.
+fn rfc5987_encode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for &byte in value.as_bytes() {
+        let unreserved = byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~');
+        if unreserved {
+            out.push(char::from(byte));
+        } else {
+            out.push('%');
+            out.push(char::from(hex_upper(byte >> 4)));
+            out.push(char::from(hex_upper(byte & 0x0f)));
+        }
+    }
+    out
+}
+
+/// Maps a nibble (`0..=15`) to its uppercase ASCII hex digit.
+const fn hex_upper(nibble: u8) -> u8 {
+    assert!(nibble < 16, "hex_upper invariant: input is a single nibble");
+    if nibble < 10 {
+        b'0' + nibble
+    } else {
+        b'A' + (nibble - 10)
+    }
+}
+
 #[async_trait::async_trait]
 impl ObjectStore for S3ObjectStore {
     async fn presign_put(
@@ -76,6 +118,7 @@ impl ObjectStore for S3ObjectStore {
         content_type: ContentType,
         ttl: Duration,
     ) -> Result<PresignedUrl, StorageError> {
+        assert!(!key.as_str().is_empty(), "storage key invariant: non-empty");
         let request = self
             .client
             .put_object()
@@ -94,9 +137,8 @@ impl ObjectStore for S3ObjectStore {
         ttl: Duration,
         download_name: &FileName,
     ) -> Result<PresignedUrl, StorageError> {
-        // Strip quotes/backslashes so the name cannot break the header quoting.
-        let safe = download_name.as_str().replace(['"', '\\'], "");
-        let disposition = format!("attachment; filename=\"{safe}\"");
+        assert!(!key.as_str().is_empty(), "storage key invariant: non-empty");
+        let disposition = content_disposition(download_name.as_str());
         let request = self
             .client
             .get_object()
@@ -133,6 +175,7 @@ impl ObjectStore for S3ObjectStore {
     }
 
     async fn delete(&self, key: &StorageKey) -> Result<(), StorageError> {
+        assert!(!key.as_str().is_empty(), "storage key invariant: non-empty");
         // S3 DELETE is idempotent — removing an absent key reports success.
         self.client
             .delete_object()
@@ -142,6 +185,42 @@ impl ObjectStore for S3ObjectStore {
             .await
             .map_err(|e| StorageError::Backend(Box::new(e)))?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod encode_tests {
+    use super::content_disposition;
+
+    #[test]
+    fn ascii_name_has_quoted_filename_and_matching_extended() {
+        let value = content_disposition("artwork.pdf");
+        assert_eq!(
+            value,
+            "attachment; filename=\"artwork.pdf\"; filename*=UTF-8''artwork.pdf"
+        );
+    }
+
+    #[test]
+    fn non_ascii_name_is_percent_encoded_in_extended_and_stripped_in_fallback() {
+        // Vietnamese filename: the ASCII fallback drops the accented bytes; the
+        // RFC 5987 `filename*` carries the exact UTF-8, percent-encoded.
+        let value = content_disposition("tờ-rơi.pdf");
+        assert!(
+            value.contains("filename*=UTF-8''t%E1%BB%9D-r%C6%A1i.pdf"),
+            "extended form carries the percent-encoded UTF-8 name: {value}"
+        );
+        assert!(
+            value.contains("filename=\"t-ri.pdf\""),
+            "ascii fallback keeps only ascii bytes: {value}"
+        );
+    }
+
+    #[test]
+    fn quotes_and_backslashes_cannot_break_the_header() {
+        let value = content_disposition("a\"b\\c.png");
+        // Neither a raw quote nor a backslash survives in the ASCII fallback.
+        assert!(value.contains("filename=\"abc.png\""), "{value}");
     }
 }
 
