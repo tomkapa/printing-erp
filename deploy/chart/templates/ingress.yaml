@@ -1,0 +1,51 @@
+{{- if .Values.ingress.enabled }}
+{{- $fullName := include "printing-erp.fullname" . -}}
+{{- $backendPort := .Values.backend.service.port -}}
+{{- $frontendPort := .Values.frontend.service.port -}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $fullName }}
+  labels:
+    {{- include "printing-erp.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- with .Values.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          # Backend API prefixes → API service. Everything else falls through to
+          # the frontend's catch-all below (nginx-ingress matches longest prefix).
+          {{- range .Values.ingress.backendPaths }}
+          - path: {{ . }}
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $fullName }}-backend
+                port:
+                  number: {{ $backendPort }}
+          {{- end }}
+          # SPA shell + /static bundles (or the backend itself if the frontend is
+          # disabled).
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                {{- if .Values.frontend.enabled }}
+                name: {{ $fullName }}-frontend
+                port:
+                  number: {{ $frontendPort }}
+                {{- else }}
+                name: {{ $fullName }}-backend
+                port:
+                  number: {{ $backendPort }}
+                {{- end }}
+{{- end }}

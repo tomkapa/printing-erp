@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "printing-erp.fullname" . }}-backend-config
+  labels:
+    {{- include "printing-erp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backend
+data:
+  # Non-secret APP__* configuration. Always present (possibly empty) so the
+  # backend Deployment can reference it via envFrom unconditionally.
+  {{- range $key, $value := .Values.config }}
+  {{ $key }}: {{ $value | quote }}
+  {{- end }}

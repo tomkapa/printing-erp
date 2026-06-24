@@ -1,0 +1,5 @@
+# Build context for backend/Dockerfile. Keep it lean: the compiled artifacts and
+# editor cruft never belong in the image build context.
+target
+**/*.rs.bk
+.env

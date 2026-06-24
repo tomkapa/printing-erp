@@ -1,0 +1,75 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "printing-erp.fullname" . }}-backend
+  labels:
+    {{- include "printing-erp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backend
+spec:
+  replicas: {{ .Values.backend.replicas }}
+  selector:
+    matchLabels:
+      {{- include "printing-erp.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: backend
+  template:
+    metadata:
+      labels:
+        {{- include "printing-erp.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: backend
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.backend.podSecurityContext | nindent 8 }}
+      containers:
+        - name: backend
+          image: "{{ .Values.backend.image.repository }}:{{ .Values.backend.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.backend.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.backend.securityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.backend.service.port }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "printing-erp.fullname" . }}-backend-config
+            {{- if include "printing-erp.hasSecret" . }}
+            - secretRef:
+                name: {{ include "printing-erp.backendSecretName" . }}
+            {{- end }}
+          env:
+            # Keep the listener in sync with the Service/containerPort.
+            - name: APP__SERVER__PORT
+              value: {{ .Values.backend.service.port | quote }}
+            {{- with .Values.backend.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          startupProbe:
+            # Absorbs the on-startup migration run before liveness/readiness apply.
+            httpGet:
+              path: /health/live
+              port: http
+            failureThreshold: {{ .Values.backend.startupProbe.failureThreshold }}
+            periodSeconds: {{ .Values.backend.startupProbe.periodSeconds }}
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: http
+          readinessProbe:
+            # /health/ready checks DB + Redis connectivity (backend/src/http).
+            httpGet:
+              path: /health/ready
+              port: http
+          resources:
+            {{- toYaml .Values.backend.resources | nindent 12 }}
+          volumeMounts:
+            # Writable scratch so the root filesystem can stay read-only.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      # Lets the app drain in-flight requests on its SIGTERM handler.
+      terminationGracePeriodSeconds: 30

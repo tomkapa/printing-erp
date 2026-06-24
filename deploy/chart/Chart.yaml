@@ -1,0 +1,13 @@
+apiVersion: v2
+name: printing-erp
+description: Print MIS/ERP — axum API backend + React/Vite SPA frontend.
+type: application
+# Chart version; bump on chart changes. appVersion tracks the app image tag and
+# is the default image tag when none is set in values.
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/tomkapa/printing-erp
+sources:
+  - https://github.com/tomkapa/printing-erp
+maintainers:
+  - name: Tom Tran

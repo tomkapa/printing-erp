@@ -1,0 +1,140 @@
+# Default values for the printing-erp chart.
+#
+# This is a GENERIC, environment-agnostic chart. Everything here is a safe
+# placeholder — NO real hostnames, database names, or secrets. Real per-
+# environment values live in a private overlay (combined at deploy time via
+# ArgoCD multi-source); secrets live in a secret store (OpenBao/Vault) and are
+# surfaced through `externalSecret` below — never committed to any repo.
+
+nameOverride: ""
+fullnameOverride: ""
+
+# Image pull secrets for private registries (e.g. ghcr). Names of existing
+# Secrets in the release namespace.
+imagePullSecrets: []
+# - name: ghcr-pull-secret
+
+backend:
+  image:
+    repository: ghcr.io/tomkapa/printing-erp-backend
+    tag: "" # defaults to .Chart.AppVersion
+    pullPolicy: IfNotPresent
+  replicas: 1
+  resources: {}
+  # The image runs as the distroless `nonroot` user (uid 65532) with a read-only
+  # root filesystem; a writable emptyDir is mounted at /tmp.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop:
+        - ALL
+  service:
+    port: 8080
+  # The backend runs DB migrations on startup (as the admin role) before it
+  # serves traffic, so the startup probe must tolerate that one-off delay:
+  # failureThreshold * periodSeconds = max migration window.
+  startupProbe:
+    failureThreshold: 30
+    periodSeconds: 5
+  # Extra raw env vars (list of {name, value} / {name, valueFrom}).
+  extraEnv: []
+
+frontend:
+  enabled: true
+  image:
+    repository: ghcr.io/tomkapa/printing-erp-frontend
+    tag: "" # defaults to .Chart.AppVersion
+    pullPolicy: IfNotPresent
+  replicas: 1
+  resources: {}
+  service:
+    port: 80
+
+# Non-secret APP__* configuration, rendered into a ConfigMap and injected via
+# envFrom. Real values belong in the private per-environment overlay, not here.
+# Keys are exactly the env vars the backend reads (backend/src/config.rs).
+config: {}
+# APP__STORAGE__REGION: auto
+# APP__STORAGE__BUCKET: printing-erp
+# APP__STORAGE__ENDPOINT_URL: https://<acct>.r2.cloudflarestorage.com
+# APP__STORAGE__FORCE_PATH_STYLE: "false"
+# APP__TELEMETRY__SERVICE_NAME: erp-server
+# APP__TELEMETRY__OTLP_ENDPOINT: http://otel-collector:4317
+# APP__REDIS__URL: redis://printing-erp-redis:6379   # if not provided via the secret
+
+# Secret APP__* configuration. Pick ONE source:
+#   externalSecret.enabled=true → sync from an External Secrets store (OpenBao/Vault)
+#   existingSecret="<name>"      → reference a Secret you manage yourself
+# Either way the Secret keys MUST be named exactly as the env vars the backend
+# reads. Required secret keys:
+#   APP__DATABASE__URL          (runtime, least-privilege erp_app role)
+#   APP__DATABASE__ADMIN_URL    (migrations / DDL — owner role)
+#   APP__REDIS__URL             (unless supplied via `config`)
+#   APP__STORAGE__ACCESS_KEY_ID
+#   APP__STORAGE__SECRET_ACCESS_KEY
+#   APP__AUTH__JWT_SECRET       (>= 256 bits; asserted at startup)
+existingSecret: ""
+externalSecret:
+  enabled: false
+  refreshInterval: 1h
+  secretStore:
+    name: vault-backend
+    kind: ClusterSecretStore
+  # Mapping of remote store keys to Secret keys (= env var names). The chart ships
+  # none; the operator fills these in their PRIVATE overlay.
+  data: []
+  # - secretKey: APP__DATABASE__URL
+  #   remoteRef:
+  #     key: printing-erp/prod
+  #     property: database_url
+
+# The chart NEVER ships a database. This flag is a documentation assertion that an
+# external Postgres is supplied via config/secret above.
+postgres:
+  external: true
+
+# Optional ephemeral in-cluster Redis — convenient for PR previews. NOT for
+# production (no persistence). When enabled, point APP__REDIS__URL at
+# redis://<release>-redis:6379 (via `config`).
+redis:
+  enabled: false
+  image:
+    repository: redis
+    tag: "7-alpine"
+    pullPolicy: IfNotPresent
+  resources: {}
+
+# Optional one-shot pre-install/pre-upgrade Job that creates the least-privilege
+# `erp_app` role (mirrors db/init/00-app-role.sql) for self-hosters. In our
+# clusters the infra layer provisions the DB + role, so this stays off.
+bootstrap:
+  enabled: false
+  image:
+    repository: postgres
+    tag: "17-alpine"
+  # Password for the erp_app role the Job creates. A placeholder only — in real
+  # use the role is created by infra with a secret-store-managed password.
+  appRolePassword: "erp_app"
+
+ingress:
+  enabled: false
+  className: nginx
+  host: chart-example.local
+  annotations: {}
+  # cert-manager.io/cluster-issuer: letsencrypt-prod
+  # Backend path prefixes routed to the API service; every other path (the SPA
+  # shell and its bundled assets) goes to the frontend. The backend serves its
+  # business API under /api and health probes under /health.
+  backendPaths:
+    - /api
+    - /health
+  tls: []
+  # - secretName: printing-erp-tls
+  #   hosts:
+  #     - chart-example.local
