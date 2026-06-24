@@ -60,6 +60,16 @@ opentelemetry-semantic-conventions = "0.30"
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
 
+# Object storage (CLAUDE.md §8 justification): the official, audited AWS SDK is
+# the only SigV4 + presigning implementation we trust — a signing bug would be a
+# security bug, and correctness/safety lead our priorities. One code path serves
+# S3, Cloudflare R2 and MinIO via a custom `endpoint_url` + `force_path_style`.
+# Static credentials and a hand-built client config let us avoid `aws-config`.
+aws-sdk-s3 = "1.96.0"
+# `dyn`-compatible async trait for the `ObjectStore` boundary so `AppState` holds
+# `Arc<dyn ObjectStore>` without threading a generic through every handler.
+async-trait = "0.1.89"
+
 [dev-dependencies]
 # Boundary-level JSON for tests only (serde deserialization paths, HTTP bodies).
 # Dev-only, so the zero-dependency bar (CLAUDE.md §8) is lower.
@@ -67,6 +77,10 @@ serde_json = "1"
 # In-memory exercising of the axum router/extractors without a live socket.
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+# Raw HTTP PUT/GET against presigned URLs in the live MinIO round-trip test —
+# exercises the URL exactly as a browser would. No TLS feature: the local MinIO
+# (docker-compose) is plain HTTP, so the default-tls/rustls trees are not pulled.
+reqwest = { version = "0.13.4", default-features = false }
 
 [lints.rust]
 unsafe_code = "forbid"

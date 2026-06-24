@@ -7,13 +7,16 @@
 //! ([`db::begin_tenant_tx`]), so Row-Level Security keys every read and write to
 //! the caller's tenant.
 
+use crate::assets::{self, Asset, AssetError, AssetStatus};
 use crate::db;
 use crate::domain::{
-    Address, BusinessSettings, BusinessSettingsRow, EmailAddress, LogoRef, Phone, TaxCode, TenantId,
+    Address, AssetId, BusinessSettings, BusinessSettingsRow, EmailAddress, LogoRef, Phone, TaxCode,
+    TenantId,
 };
 use crate::http::AuthPrincipal;
 use crate::http::limits;
 use crate::http::state::AppState;
+use crate::storage::{self, PresignedUrl};
 use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -102,7 +105,9 @@ pub(crate) async fn get_settings(
     .await
     .map_err(|_| SettingsError::Timeout)??
     .ok_or(SettingsError::NotFound)?;
-    Ok(Json(SettingsResponse::try_from(row)?))
+    let mut response = SettingsResponse::try_from(row)?;
+    attach_logo(&state, principal.tenant_id, &mut response).await;
+    Ok(Json(response))
 }
 
 /// `PUT /settings` — create or replace the tenant's business configuration.
@@ -117,7 +122,90 @@ pub(crate) async fn put_settings(
     )
     .await
     .map_err(|_| SettingsError::Timeout)??;
-    Ok(Json(SettingsResponse::try_from(row)?))
+    let mut response = SettingsResponse::try_from(row)?;
+    attach_logo(&state, principal.tenant_id, &mut response).await;
+    Ok(Json(response))
+}
+
+/// Resolves and attaches a presigned download URL for the response's logo, if
+/// one is set. Shared by `GET` and `PUT` so the resolution policy lives once.
+async fn attach_logo(state: &AppState, tenant: TenantId, response: &mut SettingsResponse) {
+    if let Some(ref logo) = response.settings.logo_url {
+        response.logo_download_url = resolve_logo(state, tenant, logo).await;
+    }
+}
+
+/// Attempts to resolve the stored logo reference to a fresh presigned GET URL.
+///
+/// After a logo is uploaded via the assets API (issue #16), the client stores
+/// the resulting [`AssetId`] UUID string as `logo_url` in settings. If the
+/// stored value is a valid UUID that points to a `ready` asset, a presigned
+/// download URL is returned so the frontend can display the logo inline.
+///
+/// Resolution never fails the settings response: a logo that is unset, not a
+/// UUID, or still `pending` yields `None` silently, while a genuine
+/// infrastructure failure (DB, storage, timeout) yields `None` *and* is logged
+/// so the outage is observable (CLAUDE.md §2) rather than indistinguishable
+/// from "no logo set". Every I/O await is bounded (CLAUDE.md §5).
+async fn resolve_logo(
+    state: &AppState,
+    tenant: TenantId,
+    logo_ref: &LogoRef,
+) -> Option<PresignedUrl> {
+    // A logo_url that is not a UUID is a legacy/free-form reference we cannot
+    // presign — benign, not an error.
+    let asset_id = AssetId::try_from(logo_ref.as_str()).ok()?;
+
+    // Fetch the asset in a bounded tenant transaction, committing before the
+    // presign so the pooled connection is released promptly.
+    let fetch = async {
+        let mut tx = db::begin_tenant_tx(&state.db, tenant).await?;
+        let asset = assets::repo::get(&mut tx, tenant, asset_id).await?;
+        tx.commit().await?;
+        Ok::<Asset, AssetError>(asset)
+    };
+    let asset = match timeout(limits::SETTINGS_QUERY_TIMEOUT, fetch).await {
+        Ok(Ok(asset)) => asset,
+        // The reference points at no live asset — benign.
+        Ok(Err(AssetError::NotFound)) => return None,
+        Ok(Err(error)) => {
+            tracing::warn!(error = ?error, event = "settings.logo.resolve_failed");
+            return None;
+        }
+        Err(_) => {
+            tracing::warn!(event = "settings.logo.resolve_timed_out");
+            return None;
+        }
+    };
+    assert_eq!(
+        asset.id, asset_id,
+        "repo::get must return the asset that was requested"
+    );
+    if !matches!(asset.status, AssetStatus::Ready) {
+        // Upload not yet completed — render nothing, but it is not a failure.
+        return None;
+    }
+
+    match timeout(
+        storage::limits::STORAGE_OP_TIMEOUT,
+        state.store.presign_get(
+            &asset.storage_key,
+            storage::limits::PRESIGN_GET_TTL,
+            &asset.original_name,
+        ),
+    )
+    .await
+    {
+        Ok(Ok(url)) => Some(url),
+        Ok(Err(error)) => {
+            tracing::warn!(error = ?error, event = "settings.logo.presign_failed");
+            None
+        }
+        Err(_) => {
+            tracing::warn!(event = "settings.logo.presign_timed_out");
+            None
+        }
+    }
 }
 
 /// Reads the tenant's settings row inside its RLS context (`None` if unset).
@@ -177,11 +265,17 @@ async fn upsert_row(
 }
 
 /// `GET`/`PUT` response: the stored configuration plus when it last changed.
+///
+/// `logo_download_url` is populated by the handler when `logo_url` refers to a
+/// ready asset uploaded via the assets API (issue #16). Absent when the logo has
+/// not been set or its asset is still pending.
 #[derive(Debug, Serialize)]
 pub(crate) struct SettingsResponse {
     #[serde(flatten)]
     settings: BusinessSettings,
     updated_at: chrono::DateTime<chrono::Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    logo_download_url: Option<PresignedUrl>,
 }
 
 impl TryFrom<BusinessSettingsRow> for SettingsResponse {
@@ -192,9 +286,12 @@ impl TryFrom<BusinessSettingsRow> for SettingsResponse {
         // typed-config conversion.
         let updated_at = row.updated_at;
         let settings = BusinessSettings::try_from(row)?;
+        // `logo_download_url` is resolved by the handler when the store is
+        // available; the conversion path (used in boundary tests) leaves it empty.
         Ok(Self {
             settings,
             updated_at,
+            logo_download_url: None,
         })
     }
 }
@@ -463,6 +560,195 @@ mod boundary_tests {
                 .expect("updated_at serializes as a string")
                 .starts_with("2023-11-14T22:13:20"),
             "updated_at renders as an RFC 3339 timestamp"
+        );
+        assert!(
+            json.get("logo_download_url").is_none(),
+            "logo_download_url is absent when logo_url is None"
+        );
+    }
+}
+
+#[cfg(test)]
+mod handler_tests {
+    //! HTTP-handler tests for logo resolution (issue #16 integration).
+    //!
+    //! Exercises `GET`/`PUT /settings` resolving a stored asset ID to a presigned
+    //! download URL. Requests carry a real Bearer access token; the in-memory
+    //! object store stands in for S3 (no Docker), over real Postgres and Redis.
+
+    use crate::assets::repo as assets_repo;
+    use crate::assets::{ByteSize, ContentType, FileName};
+    use crate::domain::{AssetId, Role, TenantId, UserId};
+    use crate::storage::InMemoryObjectStore;
+    use crate::testsupport;
+    use crate::{db, http::AppState};
+    use axum::Router;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use http_body_util::BodyExt as _;
+    use sqlx::PgPool;
+    use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+    use std::sync::Arc;
+    use tower::ServiceExt as _;
+
+    /// Returns `(router, bearer, tenant, erp_app_pool)`. The token authenticates
+    /// the seeded admin user; the pool lets a test seed the logo asset directly.
+    async fn setup(
+        opts: PgPoolOptions,
+        conn: PgConnectOptions,
+    ) -> (Router, String, TenantId, PgPool) {
+        let pool = testsupport::app_pool(opts, conn).await;
+        let tenant = testsupport::new_tenant();
+        testsupport::seed_tenant(&pool, tenant, "test-tenant").await;
+        let user =
+            testsupport::seed_user(&pool, tenant, "u@acme.test", Role::Admin, "x", true).await;
+
+        let store = InMemoryObjectStore::default();
+        let state: AppState = testsupport::app_state_with_store(
+            pool.clone(),
+            Arc::new(store),
+            testsupport::test_clock(),
+            testsupport::auth_context(),
+        )
+        .await;
+        let token = state
+            .auth()
+            .issue_access(user, tenant, Role::Admin, testsupport::epoch())
+            .expect("issue access token");
+        (
+            crate::http::router(state),
+            format!("Bearer {token}"),
+            tenant,
+            pool,
+        )
+    }
+
+    async fn send(app: Router, req: Request<Body>) -> (StatusCode, serde_json::Value) {
+        let response = app.oneshot(req).await.expect("router responds");
+        let status = response.status();
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("collect body")
+            .to_bytes();
+        let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, json)
+    }
+
+    /// Seeds a ready logo asset directly via the repo (bypasses HTTP; this is
+    /// setup, not the behavior under test). `uploader` satisfies the asset's
+    /// `uploaded_by` foreign key. Returns the asset id as a UUID string.
+    async fn seed_ready_logo(pool: &PgPool, tenant: TenantId, uploader: UserId) -> String {
+        let asset = AssetId::try_from(uuid::Uuid::new_v4()).expect("non-nil");
+        let name = FileName::try_from("logo.png").expect("valid name");
+        let size = ByteSize::try_from(1024_i64).expect("positive");
+
+        let mut tx = db::begin_tenant_tx(pool, tenant).await.expect("begin tx");
+        assets_repo::insert_pending(
+            &mut tx,
+            tenant,
+            asset,
+            &name,
+            ContentType::Png,
+            size,
+            uploader,
+        )
+        .await
+        .expect("insert pending");
+        assets_repo::mark_ready(&mut tx, asset, None)
+            .await
+            .expect("mark ready");
+        tx.commit().await.expect("commit");
+
+        asset.as_uuid().to_string()
+    }
+
+    /// Resolves the seeded tenant's single user id (the uploader for the logo).
+    async fn sole_user(pool: &PgPool, tenant: TenantId) -> UserId {
+        let mut tx = db::begin_tenant_tx(pool, tenant).await.expect("begin tx");
+        let id: uuid::Uuid = sqlx::query_scalar("SELECT id FROM users LIMIT 1")
+            .fetch_one(&mut *tx)
+            .await
+            .expect("seeded user exists");
+        tx.commit().await.expect("commit");
+        UserId::try_from(id).expect("non-nil user id")
+    }
+
+    fn put(bearer: &str, body: &serde_json::Value) -> Request<Body> {
+        Request::builder()
+            .method("PUT")
+            .uri("/settings")
+            .header("authorization", bearer)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("build PUT")
+    }
+
+    fn get(bearer: &str) -> Request<Body> {
+        Request::builder()
+            .method("GET")
+            .uri("/settings")
+            .header("authorization", bearer)
+            .body(Body::empty())
+            .expect("build GET")
+    }
+
+    #[sqlx::test]
+    async fn get_settings_resolves_logo_to_presigned_url(
+        opts: PgPoolOptions,
+        conn: PgConnectOptions,
+    ) {
+        let (app, bearer, tenant, pool) = setup(opts, conn).await;
+        let uploader = sole_user(&pool, tenant).await;
+        let asset_id = seed_ready_logo(&pool, tenant, uploader).await;
+
+        // PUT /settings with the asset UUID as logo_url.
+        let put_body = serde_json::json!({
+            "legal_name": "Acme Print Co",
+            "currency": "VND",
+            "tax_rate_bps": 1000,
+            "default_unit": "tờ",
+            "logo_url": asset_id,
+        });
+        let (put_status, _) = send(app.clone(), put(&bearer, &put_body)).await;
+        assert_eq!(put_status, StatusCode::OK, "PUT /settings succeeds");
+
+        // GET /settings must include logo_download_url resolved to a presigned URL.
+        let (get_status, body) = send(app, get(&bearer)).await;
+        assert_eq!(get_status, StatusCode::OK, "GET /settings succeeds");
+        assert_eq!(
+            body["logo_url"], asset_id,
+            "logo_url echoes the stored asset id"
+        );
+        assert!(
+            body["logo_download_url"]
+                .as_str()
+                .is_some_and(|u| u.starts_with("memory://")),
+            "logo_download_url is a presigned URL from the in-memory store"
+        );
+    }
+
+    #[sqlx::test]
+    async fn get_settings_omits_logo_download_url_when_logo_not_set(
+        opts: PgPoolOptions,
+        conn: PgConnectOptions,
+    ) {
+        let (app, bearer, _tenant, _pool) = setup(opts, conn).await;
+
+        let put_body = serde_json::json!({
+            "legal_name": "No Logo Co",
+            "currency": "VND",
+            "tax_rate_bps": 0,
+            "default_unit": "tờ",
+        });
+        send(app.clone(), put(&bearer, &put_body)).await;
+
+        let (status, body) = send(app, get(&bearer)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body.get("logo_download_url").is_none(),
+            "logo_download_url is absent when no logo has been set"
         );
     }
 }

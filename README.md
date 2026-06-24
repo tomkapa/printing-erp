@@ -38,6 +38,7 @@ portal and e-invoice integration follow in later phases.
 | Backend | **Rust** — axum (HTTP) + tower, tokio runtime |
 | Persistence | **PostgreSQL** via sqlx (runtime queries, embedded migrations) |
 | Queue / cache | **Redis** (background jobs, caching) |
+| Object storage | **S3-compatible** (AWS S3 / Cloudflare R2 / MinIO) via `aws-sdk-s3`, presigned URLs |
 | Config | `config` + `secrecy` (layered file + `APP__*` env, secrets redacted) |
 | Telemetry | `tracing` + OpenTelemetry (OTLP/gRPC export) |
 | Errors | `thiserror` at module boundaries, `anyhow` only in the binary |
@@ -81,8 +82,10 @@ printing-erp/
 docker compose up -d
 ```
 
-This brings up PostgreSQL on `localhost:5432` and Redis on `localhost:6379`
-(credentials `erp` / `erp`, database `erp`).
+This brings up PostgreSQL on `localhost:5432`, Redis on `localhost:6379`
+(credentials `erp` / `erp`, database `erp`) and **MinIO** (S3-compatible object
+storage) on `localhost:9000` with a console on `localhost:9001`. A one-shot
+`minio-init` container creates the `erp-assets` bucket.
 
 ### 2. Run the backend
 
@@ -110,6 +113,25 @@ bun run dev
 
 Open `http://localhost:5173`. The dev server proxies `/api` and `/health` to
 the backend, and the home page shows live backend/database/Redis status.
+
+## Object storage (assets)
+
+File uploads (print artwork, proofs) never stream through the API. The backend
+issues short-lived **presigned URLs** and the client transfers bytes directly to
+the object store:
+
+1. `POST /assets` — declare `{ filename, content_type, size_bytes }`; returns an
+   `asset_id` and a presigned `upload_url`.
+2. `PUT` the file to `upload_url` (S3 / R2 / MinIO directly, out of band).
+3. `POST /assets/{id}/complete` — the backend HEAD-verifies the object and marks
+   it `ready`.
+4. `GET /assets/{id}` returns a presigned download URL; `DELETE /assets/{id}`
+   removes the bytes and soft-deletes the record.
+
+The provider is pure configuration (`APP__STORAGE__*`, see `.env.example`): one
+code path serves AWS S3, Cloudflare R2 and MinIO via `endpoint_url`, `region`
+and `force_path_style`. Asset rows are tenant-scoped under Row-Level Security,
+like every other table.
 
 ## Development
 

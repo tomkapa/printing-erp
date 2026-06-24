@@ -2,6 +2,7 @@
 
 use crate::auth::AuthContext;
 use crate::clock::Clock;
+use crate::storage::ObjectStore;
 use axum::extract::FromRef;
 use redis::aio::ConnectionManager;
 use sqlx::PgPool;
@@ -16,6 +17,9 @@ use std::time::Instant;
 pub(crate) struct AppState {
     pub(crate) db: PgPool,
     pub(crate) redis: ConnectionManager,
+    /// S3-compatible object store, behind the [`ObjectStore`] boundary so the
+    /// real client and the test fake are interchangeable (CLAUDE.md §1, §9).
+    pub(crate) store: Arc<dyn ObjectStore>,
     clock: Arc<dyn Clock>,
     auth: Arc<AuthContext>,
     started_at: Instant,
@@ -26,6 +30,7 @@ impl AppState {
     pub(crate) fn new(
         db: PgPool,
         redis: ConnectionManager,
+        store: Arc<dyn ObjectStore>,
         clock: Arc<dyn Clock>,
         auth: Arc<AuthContext>,
     ) -> Self {
@@ -33,6 +38,7 @@ impl AppState {
         Self {
             db,
             redis,
+            store,
             clock,
             auth,
             started_at,
@@ -77,6 +83,7 @@ impl std::fmt::Debug for AppState {
         f.debug_struct("AppState")
             .field("db", &"PgPool")
             .field("redis", &"ConnectionManager")
+            .field("store", &self.store)
             .field("clock", &self.clock)
             .field("auth", &self.auth)
             .field("started_at", &self.started_at)

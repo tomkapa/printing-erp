@@ -6,12 +6,24 @@
 # Schema is the cargo-deny v2 format (cargo-deny >= 0.18).
 
 [advisories]
-# No `ignore` is needed here: `cargo deny` resolves advisories against the actual
-# build graph, which excludes the feature-disabled MySQL driver, so it never sees
-# the vulnerable `rsa` crate (RUSTSEC-2023-0071). `cargo audit`, by contrast,
-# scans Cargo.lock and *does* flag `rsa`; its suppression — with the full
-# rationale — lives in `.cargo/audit.toml`. If `rsa` ever enters the real graph
-# (e.g. someone enables the MySQL driver), this check will correctly fail.
+# `cargo deny` resolves advisories against the actual build graph. It never sees
+# the vulnerable `rsa` crate (RUSTSEC-2023-0071) because the MySQL driver is
+# feature-disabled, so that advisory is suppressed only in `.cargo/audit.toml`
+# (which scans Cargo.lock). The advisories below, by contrast, ARE in the
+# compiled graph: they come from `aws-sdk-s3`'s default TLS connector
+# (hyper-rustls 0.24 / rustls 0.21), pulled in by issue #16's object storage.
+# Production reaches R2/S3 through the SDK's maintained client; the same IDs and
+# rationale are mirrored in `.cargo/audit.toml`. Remove each once the SDK bumps
+# its connector.
+# Only the four advisories cargo-deny actually resolves in the build graph are
+# listed; `time`/`lru` advisories that audit flags from Cargo.lock are not in
+# deny's graph, so listing them here would only emit `advisory-not-detected`.
+ignore = [
+    "RUSTSEC-2026-0104", # rustls-webpki: reachable panic parsing a CRL
+    "RUSTSEC-2026-0098", # rustls-webpki: URI-name constraints accepted
+    "RUSTSEC-2026-0099", # rustls-webpki: wildcard name constraints accepted
+    "RUSTSEC-2025-0134", # rustls-pemfile 1.x unmaintained
+]
 
 [licenses]
 # Permissive licenses present across the dependency tree. A new dependency on a

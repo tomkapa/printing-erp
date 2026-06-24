@@ -1,10 +1,32 @@
-# cargo-audit configuration (run `cargo audit` from `backend/`).
+# cargo-audit policy (CLAUDE.md §3, §8). Run `cargo audit` from `backend/`.
 #
-# RUSTSEC-2023-0071 — Marvin timing side-channel in `rsa`. The crate is resolved
-# into Cargo.lock via `sqlx-macros-core`'s optional `sqlx-mysql` dependency, but
-# only the Postgres driver is enabled, so `rsa` is never compiled into the build
-# (`cargo tree -i rsa` reports nothing). No fixed release exists. We use Postgres
-# exclusively (backend/src/db.rs), so there is no exposure. The same advisory and
-# rationale are mirrored in deny.toml. Re-evaluate when a patched `rsa` ships.
+# `cargo audit` reads Cargo.lock and flags advisories whether or not the crate is
+# actually compiled, so every suppression below is triaged with a rationale.
+# Remove an entry once the upstream dependency ships a fix.
 [advisories]
-ignore = ["RUSTSEC-2023-0071"]
+ignore = [
+    # --- aws-smithy-http-client's default TLS connector (hyper-rustls 0.24 /
+    # rustls 0.21), pulled in transitively by `aws-sdk-s3` (justified in
+    # Cargo.toml). Production reaches R2/S3 through the SDK's maintained client;
+    # local MinIO is plain HTTP. Clears when the SDK updates its connector. These
+    # crates ARE compiled, so the same IDs are mirrored in deny.toml. ---
+    "RUSTSEC-2026-0104", # rustls-webpki: reachable panic parsing a CRL
+    "RUSTSEC-2026-0098", # rustls-webpki: URI-name constraints accepted
+    "RUSTSEC-2026-0099", # rustls-webpki: wildcard name constraints accepted
+    "RUSTSEC-2025-0134", # rustls-pemfile 1.x unmaintained
+
+    # --- core SDK deps, not driven by untrusted input here ---
+    "RUSTSEC-2026-0009", # time: DoS via stack exhaustion in parsing. time 0.3.51
+                         # fixes it but needs Rust 1.88; our MSRV is 1.85. The SDK
+                         # only formats signing timestamps, never parses attacker input.
+    "RUSTSEC-2026-0002", # lru: IterMut unsoundness — the SDK's internal endpoint cache.
+
+    # RUSTSEC-2023-0071 — Marvin timing side-channel in `rsa`. The crate is
+    # resolved into Cargo.lock via `sqlx-macros-core`'s optional `sqlx-mysql`
+    # dependency, but only the Postgres driver is enabled, so `rsa` is never
+    # compiled into the build (`cargo tree -i rsa` reports nothing). No fixed
+    # release exists. We use Postgres exclusively (backend/src/db.rs), so there is
+    # no exposure. deny.toml is graph-aware and never sees `rsa`, so it carries no
+    # matching ignore. Re-evaluate when a patched `rsa` ships.
+    "RUSTSEC-2023-0071",
+]

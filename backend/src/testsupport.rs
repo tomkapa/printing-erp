@@ -14,6 +14,7 @@ use crate::config::AuthSettings;
 use crate::db;
 use crate::domain::{Role, TenantId, UserId};
 use crate::http::AppState;
+use crate::storage::{InMemoryObjectStore, ObjectStore};
 use chrono::{DateTime, TimeZone as _, Utc};
 use redis::aio::ConnectionManager;
 use secrecy::SecretString;
@@ -69,13 +70,26 @@ pub(crate) async fn redis_manager() -> ConnectionManager {
         .expect("redis connection (is docker-compose redis up?)")
 }
 
-/// Assembles an [`AppState`] over the given pool, clock, and auth context.
+/// Assembles an [`AppState`] over the given pool, clock, and auth context, with
+/// a throwaway in-memory object store. For tests that must inspect the store
+/// (asset upload/download, settings logo resolution), use [`app_state_with_store`].
 pub(crate) async fn app_state(
     pool: PgPool,
     clock: Arc<TestClock>,
     auth: Arc<AuthContext>,
 ) -> AppState {
-    AppState::new(pool, redis_manager().await, clock, auth)
+    app_state_with_store(pool, Arc::new(InMemoryObjectStore::default()), clock, auth).await
+}
+
+/// Like [`app_state`] but takes an explicit object store so a test can seed and
+/// assert against the same fake the handlers use.
+pub(crate) async fn app_state_with_store(
+    pool: PgPool,
+    store: Arc<dyn ObjectStore>,
+    clock: Arc<TestClock>,
+    auth: Arc<AuthContext>,
+) -> AppState {
+    AppState::new(pool, redis_manager().await, store, clock, auth)
 }
 
 /// Inserts a user inside the tenant's RLS context and returns its id. The caller

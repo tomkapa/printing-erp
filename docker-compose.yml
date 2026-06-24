@@ -39,6 +39,41 @@ services:
       timeout: 3s
       retries: 10
 
+  # S3-compatible object storage for assets (issue #16). In production the app
+  # points at AWS S3 or Cloudflare R2; locally we run MinIO so the full presigned
+  # upload/download flow works offline. The API (9000) is published on localhost
+  # so presigned URLs — which embed the endpoint host — are reachable from the
+  # browser; the console is on 9001.
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      # Used as the SigV4 access key id / secret by the backend. The password
+      # must be at least 8 characters (MinIO requirement).
+      MINIO_ROOT_USER: erp
+      MINIO_ROOT_PASSWORD: erp_secret_dev
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - miniodata:/data
+
+  # One-shot: wait for MinIO, then create the assets bucket. Exits 0 when done.
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      until mc alias set local http://minio:9000 erp erp_secret_dev; do
+        echo 'waiting for minio...'; sleep 1;
+      done;
+      mc mb --ignore-existing local/erp-assets;
+      exit 0;
+      "
+
 volumes:
   pgdata:
   redisdata:
+  miniodata:

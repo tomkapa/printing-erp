@@ -27,6 +27,8 @@ pub(crate) struct Settings {
     pub(crate) database: DatabaseSettings,
     /// Redis connection.
     pub(crate) redis: RedisSettings,
+    /// S3-compatible object storage (S3 / Cloudflare R2 / MinIO).
+    pub(crate) storage: StorageSettings,
     /// Authentication: JWT signing + token lifetimes.
     pub(crate) auth: AuthSettings,
     /// Tracing / OpenTelemetry export.
@@ -90,6 +92,38 @@ impl DatabaseSettings {
 pub(crate) struct RedisSettings {
     /// Full connection URL (`redis://host:port`).
     pub(crate) url: SecretString,
+}
+
+/// S3-compatible object storage settings.
+///
+/// One configuration serves AWS S3, Cloudflare R2 and MinIO — they speak the
+/// same SigV4 protocol, so portability is a matter of these knobs, not of a
+/// per-provider code path (CLAUDE.md §4: no abstraction the data does not need).
+#[derive(Debug, Deserialize)]
+pub(crate) struct StorageSettings {
+    /// Custom endpoint for R2/MinIO (e.g. `https://<acct>.r2.cloudflarestorage.com`
+    /// or `http://localhost:9000`). Absent ⇒ the default AWS S3 endpoint.
+    ///
+    /// SECURITY/OPS — this host is baked into **presigned URLs**, so it must be
+    /// reachable by the *client* that uploads/downloads (the browser), not just
+    /// by the server. In local dev use `localhost:9000`, never the
+    /// docker-internal hostname the backend would otherwise resolve.
+    #[serde(default)]
+    pub(crate) endpoint_url: Option<String>,
+    /// SigV4 region. AWS uses real regions; R2 uses `auto`; MinIO accepts any
+    /// non-empty token but it must match what the client signs with.
+    pub(crate) region: String,
+    /// Bucket that holds every tenant's objects (tenant-prefixed keys).
+    pub(crate) bucket: String,
+    /// Access key id (SigV4 credential). Secret so it never reaches logs.
+    pub(crate) access_key_id: SecretString,
+    /// Secret access key (SigV4 credential).
+    pub(crate) secret_access_key: SecretString,
+    /// Path-style addressing (`endpoint/bucket/key`) instead of virtual-hosted
+    /// (`bucket.endpoint/key`). Required by MinIO; harmless for R2. Defaults to
+    /// virtual-hosted, which is what real AWS S3 expects.
+    #[serde(default)]
+    pub(crate) force_path_style: bool,
 }
 
 /// Authentication settings: the HS256 signing secret and token lifetimes.
@@ -219,7 +253,10 @@ fn default_log_level() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{DatabaseSettings, ServerSettings, default_acquire_timeout_secs, default_port};
+    use super::{
+        DatabaseSettings, ServerSettings, StorageSettings, default_acquire_timeout_secs,
+        default_port,
+    };
     use secrecy::SecretString;
     use std::time::Duration;
 
@@ -274,6 +311,29 @@ mod tests {
     fn defaults_are_sane() {
         assert_eq!(default_port(), 8080);
         assert_eq!(default_acquire_timeout_secs(), 5);
+    }
+
+    #[test]
+    fn storage_optional_fields_default_off() {
+        // Only the four required keys are supplied; `endpoint_url` and
+        // `force_path_style` must fall back to their AWS-shaped defaults.
+        let json = serde_json::json!({
+            "region": "us-east-1",
+            "bucket": "erp-assets",
+            "access_key_id": "ak",
+            "secret_access_key": "sk",
+        });
+        let storage: StorageSettings =
+            serde_json::from_value(json).expect("required keys deserialize");
+        assert!(
+            storage.endpoint_url.is_none(),
+            "absent endpoint_url means default AWS S3"
+        );
+        assert!(
+            !storage.force_path_style,
+            "default addressing is virtual-hosted, as AWS S3 expects"
+        );
+        assert_eq!(storage.bucket, "erp-assets");
     }
 
     #[test]
