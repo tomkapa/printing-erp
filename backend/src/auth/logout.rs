@@ -6,9 +6,11 @@
 //! truly logged out. Only a database fault surfaces as an error.
 
 use super::error::{AuthError, internal};
+use super::limits::AUTH_QUERY_TIMEOUT;
 use super::opaque;
 use crate::clock::Clock;
 use crate::db;
+use tokio::time::timeout;
 
 /// Logout request body — the opaque refresh token to invalidate.
 #[derive(Debug, serde::Deserialize)]
@@ -32,22 +34,30 @@ pub(crate) async fn logout(
     let Ok((tenant, hash)) = opaque::parse(&request.refresh_token) else {
         return Ok(());
     };
+    assert_eq!(hash.as_bytes().len(), 32, "token hash is 32 bytes");
+    assert!(!tenant.as_uuid().is_nil(), "parsed tenant id is non-nil");
 
-    let mut tx = db::begin_tenant_tx(pool, tenant).await.map_err(internal)?;
-    // Revoke the whole family of the row matching this hash. A miss revokes
-    // nothing (the subquery is NULL), keeping logout idempotent.
-    sqlx::query(
-        "UPDATE refresh_tokens SET revoked_at = $1 \
-         WHERE family_id = (SELECT family_id FROM refresh_tokens WHERE token_hash = $2) \
-         AND revoked_at IS NULL",
-    )
-    .bind(now)
-    .bind(hash.as_bytes())
-    .execute(&mut *tx)
-    .await
-    .map_err(internal)?;
-    tx.commit().await.map_err(internal)?;
-    Ok(())
+    // One timeout bounds both the UPDATE and the commit (CLAUDE.md §5).
+    let work = async {
+        let mut tx = db::begin_tenant_tx(pool, tenant).await.map_err(internal)?;
+        // Revoke the whole family of the row matching this hash. A miss revokes
+        // nothing (the subquery is NULL), keeping logout idempotent.
+        sqlx::query(
+            "UPDATE refresh_tokens SET revoked_at = $1 \
+             WHERE family_id = (SELECT family_id FROM refresh_tokens WHERE token_hash = $2) \
+             AND revoked_at IS NULL",
+        )
+        .bind(now)
+        .bind(hash.as_bytes())
+        .execute(&mut *tx)
+        .await
+        .map_err(internal)?;
+        tx.commit().await.map_err(internal)?;
+        Ok(())
+    };
+    timeout(AUTH_QUERY_TIMEOUT, work)
+        .await
+        .map_err(|_| AuthError::Timeout)?
 }
 
 #[cfg(test)]

@@ -9,6 +9,7 @@
 
 use super::context::AuthContext;
 use super::error::{AuthError, deadline, internal};
+use super::limits::AUTH_QUERY_TIMEOUT;
 use super::opaque;
 use super::password::hash_password;
 use super::tenants;
@@ -17,6 +18,7 @@ use crate::db;
 use crate::domain::{Email, PlaintextPassword, TenantSlug, UserId};
 use chrono::{DateTime, Utc};
 use sqlx::PgConnection;
+use tokio::time::timeout;
 use uuid::Uuid;
 
 /// Forgot-password request body.
@@ -50,43 +52,56 @@ pub(crate) async fn forgot_password(
     request: ForgotRequest,
 ) -> Result<(), AuthError> {
     let now = clock.now_utc();
-    let Some(tenant) = tenants::resolve_by_slug(pool, &request.tenant_slug).await? else {
-        return Ok(());
+    // Bound the whole DB round-trip (CLAUDE.md §5); the work yields the raw token
+    // to deliver (or `None` when nothing was issued), so the notifier call below
+    // happens only after the token is durably committed, outside the timeout.
+    let work = async {
+        let Some(tenant) = tenants::resolve_by_slug(pool, &request.tenant_slug).await? else {
+            return Ok(None);
+        };
+
+        let mut tx = db::begin_tenant_tx(pool, tenant).await.map_err(internal)?;
+        let user: Option<Uuid> =
+            sqlx::query_scalar("SELECT id FROM users WHERE email = $1 AND is_active = TRUE")
+                .bind(request.email.as_str())
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(internal)?;
+
+        let Some(user_id) = user else {
+            // No active user: nothing issued, but the response is identical.
+            return Ok(None);
+        };
+        let user_id = UserId::try_from(user_id).map_err(internal)?;
+
+        let minted = opaque::mint(tenant);
+        assert!(!minted.raw.is_empty(), "minted reset token is non-empty");
+        assert_eq!(minted.hash.as_bytes().len(), 32, "token hash is 32 bytes");
+        let expires_at = deadline(now, auth.reset_ttl())?;
+        sqlx::query(
+            "INSERT INTO password_reset_tokens \
+             (tenant_id, user_id, token_hash, issued_at, expires_at) \
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(tenant.as_uuid())
+        .bind(user_id.as_uuid())
+        .bind(minted.hash.as_bytes())
+        .bind(now)
+        .bind(expires_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(internal)?;
+        tx.commit().await.map_err(internal)?;
+        Ok(Some(minted.raw))
     };
-
-    let mut tx = db::begin_tenant_tx(pool, tenant).await.map_err(internal)?;
-    let user: Option<Uuid> =
-        sqlx::query_scalar("SELECT id FROM users WHERE email = $1 AND is_active = TRUE")
-            .bind(request.email.as_str())
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(internal)?;
-
-    let Some(user_id) = user else {
-        // No active user: nothing issued, but the response is identical.
-        return Ok(());
-    };
-    let user_id = UserId::try_from(user_id).map_err(internal)?;
-
-    let minted = opaque::mint(tenant);
-    let expires_at = deadline(now, auth.reset_ttl())?;
-    sqlx::query(
-        "INSERT INTO password_reset_tokens \
-         (tenant_id, user_id, token_hash, issued_at, expires_at) \
-         VALUES ($1, $2, $3, $4, $5)",
-    )
-    .bind(tenant.as_uuid())
-    .bind(user_id.as_uuid())
-    .bind(minted.hash.as_bytes())
-    .bind(now)
-    .bind(expires_at)
-    .execute(&mut *tx)
-    .await
-    .map_err(internal)?;
-    tx.commit().await.map_err(internal)?;
+    let issued = timeout(AUTH_QUERY_TIMEOUT, work)
+        .await
+        .map_err(|_| AuthError::Timeout)??;
 
     // Deliver out of band only after the token is durably stored.
-    auth.notifier().notify_reset(&request.email, &minted.raw);
+    if let Some(raw) = issued {
+        auth.notifier().notify_reset(&request.email, &raw);
+    }
     Ok(())
 }
 
@@ -104,26 +119,35 @@ pub(crate) async fn reset_password(
 ) -> Result<(), AuthError> {
     let now = clock.now_utc();
     let (tenant, hash) = opaque::parse(&request.token).map_err(|_| AuthError::InvalidToken)?;
+    assert_eq!(hash.as_bytes().len(), 32, "token hash is 32 bytes");
 
-    let mut tx = db::begin_tenant_tx(pool, tenant).await.map_err(internal)?;
-    let row: Option<ResetTokenColumns> = sqlx::query_as(
-        "SELECT id, user_id, expires_at, consumed_at \
-         FROM password_reset_tokens WHERE token_hash = $1",
-    )
-    .bind(hash.as_bytes())
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(internal)?;
+    // One timeout bounds the lookup, the password hash write, and the commit
+    // (CLAUDE.md §5).
+    let work = async {
+        let mut tx = db::begin_tenant_tx(pool, tenant).await.map_err(internal)?;
+        let row: Option<ResetTokenColumns> = sqlx::query_as(
+            "SELECT id, user_id, expires_at, consumed_at \
+             FROM password_reset_tokens WHERE token_hash = $1",
+        )
+        .bind(hash.as_bytes())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(internal)?;
 
-    let (token_id, user_id, expires_at, consumed_at) = row.ok_or(AuthError::InvalidToken)?;
-    if consumed_at.is_some() || expires_at <= now {
-        return Err(AuthError::InvalidToken);
-    }
+        let (token_id, user_id, expires_at, consumed_at) = row.ok_or(AuthError::InvalidToken)?;
+        assert!(!user_id.is_nil(), "reset token references a real user");
+        if consumed_at.is_some() || expires_at <= now {
+            return Err(AuthError::InvalidToken);
+        }
 
-    let new_hash = hash_password(&request.new_password).map_err(internal)?;
-    apply_reset(&mut tx, user_id, token_id, &new_hash, now).await?;
-    tx.commit().await.map_err(internal)?;
-    Ok(())
+        let new_hash = hash_password(&request.new_password).map_err(internal)?;
+        apply_reset(&mut tx, user_id, token_id, &new_hash, now).await?;
+        tx.commit().await.map_err(internal)?;
+        Ok(())
+    };
+    timeout(AUTH_QUERY_TIMEOUT, work)
+        .await
+        .map_err(|_| AuthError::Timeout)?
 }
 
 /// Within the open transaction: set the new hash, consume the token, and revoke

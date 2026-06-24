@@ -49,30 +49,47 @@ pub(crate) async fn login(
     request: LoginRequest,
 ) -> Result<TokenPair, AuthError> {
     let now = clock.now_utc();
-    let Some(tenant) = tenants::resolve_by_slug(pool, &request.tenant_slug).await? else {
-        // Unknown tenant: do equivalent verification work, then fail uniformly.
-        let _ignored = verify_or_dummy(&request.password, None);
-        return Err(AuthError::InvalidCredentials);
+    // Bound the whole tenant-scoped round-trip (CLAUDE.md §5), like
+    // `http::routes::tenant::me`: one timeout covers every I/O await below.
+    let work = async {
+        let Some(tenant) = tenants::resolve_by_slug(pool, &request.tenant_slug).await? else {
+            // Unknown tenant: do equivalent verification work, then fail uniformly.
+            let _ignored = verify_or_dummy(&request.password, None);
+            return Err(AuthError::InvalidCredentials);
+        };
+
+        let mut tx = db::begin_tenant_tx(pool, tenant).await.map_err(internal)?;
+        let found = load_user(&mut tx, &request.email).await?;
+        let (user, role) = authenticate(&request.password, found)?;
+
+        let pair = issue_pair(&mut tx, auth, now, user, tenant, role, Uuid::new_v4()).await?;
+        tx.commit().await.map_err(internal)?;
+        Ok(pair)
     };
+    let pair = timeout(AUTH_QUERY_TIMEOUT, work)
+        .await
+        .map_err(|_| AuthError::Timeout)??;
 
-    let mut tx = db::begin_tenant_tx(pool, tenant).await.map_err(internal)?;
-    let found = load_user(&mut tx, &request.email).await?;
-    let (user, role) = authenticate(&request.password, found)?;
-
-    let pair = issue_pair(&mut tx, auth, now, user, tenant, role, Uuid::new_v4()).await?;
-    tx.commit().await.map_err(internal)?;
+    // Post-conditions (CLAUDE.md §6): a successful login always yields both tokens.
+    assert!(
+        !pair.access_token.is_empty(),
+        "issued access token is non-empty"
+    );
+    assert!(
+        !pair.refresh_token.is_empty(),
+        "issued refresh token is non-empty"
+    );
     Ok(pair)
 }
 
-/// Loads the user with `email` within the current tenant transaction.
+/// Loads the user with `email` within the current tenant transaction. The
+/// caller bounds this await as part of the flow-level timeout.
 async fn load_user(conn: &mut PgConnection, email: &Email) -> Result<Option<UserRow>, AuthError> {
-    let query =
-        sqlx::query_as("SELECT id, role, password_hash, is_active FROM users WHERE email = $1")
-            .bind(email.as_str());
     let row: Option<(Uuid, Role, String, bool)> =
-        timeout(AUTH_QUERY_TIMEOUT, query.fetch_optional(&mut *conn))
+        sqlx::query_as("SELECT id, role, password_hash, is_active FROM users WHERE email = $1")
+            .bind(email.as_str())
+            .fetch_optional(&mut *conn)
             .await
-            .map_err(internal)?
             .map_err(internal)?;
     match row {
         None => Ok(None),

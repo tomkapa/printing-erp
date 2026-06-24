@@ -11,6 +11,7 @@
 
 use super::context::AuthContext;
 use super::error::{AuthError, internal};
+use super::limits::AUTH_QUERY_TIMEOUT;
 use super::opaque::{self, TokenHash};
 use super::session::{TokenPair, issue_refresh};
 use crate::clock::Clock;
@@ -18,6 +19,7 @@ use crate::db;
 use crate::domain::{RefreshTokenId, Role, TenantId, UserId};
 use chrono::{DateTime, Utc};
 use sqlx::PgConnection;
+use tokio::time::timeout;
 use uuid::Uuid;
 
 /// Refresh request body — the opaque (routable) refresh token.
@@ -62,27 +64,40 @@ pub(crate) async fn refresh(
     let now = clock.now_utc();
     let (tenant, hash) =
         opaque::parse(&request.refresh_token).map_err(|_| AuthError::InvalidToken)?;
+    // The 32-byte token hash is the only width guard now that the DB CHECK is
+    // gone (CLAUDE.md §6 — assert the invariant at the use site).
+    assert_eq!(hash.as_bytes().len(), 32, "token hash is 32 bytes");
 
-    let mut tx = db::begin_tenant_tx(pool, tenant).await.map_err(internal)?;
-    let Some(row) = fetch_row(&mut tx, &hash).await? else {
-        return Err(AuthError::InvalidToken);
+    // One timeout bounds every I/O await in the rotation (CLAUDE.md §5).
+    let work = async {
+        let mut tx = db::begin_tenant_tx(pool, tenant).await.map_err(internal)?;
+        let Some(row) = fetch_row(&mut tx, &hash).await? else {
+            return Err(AuthError::InvalidToken);
+        };
+        assert!(
+            !row.family_id.is_nil(),
+            "stored refresh family id is non-nil"
+        );
+
+        match classify(&row, now) {
+            Disposition::Reuse => {
+                // Persist the family revocation before reporting the failure.
+                revoke_family(&mut tx, row.family_id, now).await?;
+                tx.commit().await.map_err(internal)?;
+                Err(AuthError::InvalidToken)
+            }
+            // Dropping `tx` rolls back; nothing was written.
+            Disposition::Dead => Err(AuthError::InvalidToken),
+            Disposition::Live => {
+                let pair = rotate(&mut tx, auth, now, &row, tenant).await?;
+                tx.commit().await.map_err(internal)?;
+                Ok(pair)
+            }
+        }
     };
-
-    match classify(&row, now) {
-        Disposition::Reuse => {
-            // Persist the family revocation before reporting the failure.
-            revoke_family(&mut tx, row.family_id, now).await?;
-            tx.commit().await.map_err(internal)?;
-            Err(AuthError::InvalidToken)
-        }
-        // Dropping `tx` rolls back; nothing was written.
-        Disposition::Dead => Err(AuthError::InvalidToken),
-        Disposition::Live => {
-            let pair = rotate(&mut tx, auth, now, &row, tenant).await?;
-            tx.commit().await.map_err(internal)?;
-            Ok(pair)
-        }
-    }
+    timeout(AUTH_QUERY_TIMEOUT, work)
+        .await
+        .map_err(|_| AuthError::Timeout)?
 }
 
 /// Loads the row for `hash` (RLS already scopes it to the token's tenant),

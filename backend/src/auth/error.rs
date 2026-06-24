@@ -28,6 +28,11 @@ pub(crate) enum AuthError {
     /// An unexpected internal failure (already logged at the source).
     #[error("internal authentication error")]
     Internal,
+
+    /// The bounded database round-trip exceeded [`AUTH_QUERY_TIMEOUT`]
+    /// (`super::limits`). An availability failure, distinct from an internal bug.
+    #[error("authentication query timed out")]
+    Timeout,
 }
 
 impl IntoResponse for AuthError {
@@ -35,6 +40,9 @@ impl IntoResponse for AuthError {
         let status = match self {
             Self::InvalidCredentials | Self::InvalidToken => StatusCode::UNAUTHORIZED,
             Self::Internal => StatusCode::INTERNAL_SERVER_ERROR,
+            // A bounded-query timeout is an availability failure, not an internal
+            // bug — report 504 so it is distinguishable (mirrors `SettingsError`).
+            Self::Timeout => StatusCode::GATEWAY_TIMEOUT,
         };
         status.into_response()
     }
