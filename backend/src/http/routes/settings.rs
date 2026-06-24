@@ -78,10 +78,17 @@ impl IntoResponse for SettingsError {
         if matches!(self, Self::NotFound) {
             return StatusCode::NOT_FOUND.into_response();
         }
-        // Parse / Db / Timeout are all unexpected: log with the error attached so
-        // the OTel bridge marks the span ERROR (CLAUDE.md §2), then return 500.
+        // A bounded-query timeout is an availability failure, not an internal
+        // bug: report it as 504 so it is distinguishable from a 500. Parse / Db
+        // are unexpected → 500. Either way log with the error attached so the
+        // OTel bridge marks the span ERROR (CLAUDE.md §2).
+        let status = if matches!(self, Self::Timeout) {
+            StatusCode::GATEWAY_TIMEOUT
+        } else {
+            StatusCode::INTERNAL_SERVER_ERROR
+        };
         tracing::error!(error = ?self, event = "settings.request.failed");
-        StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        status.into_response()
     }
 }
 
@@ -378,4 +385,83 @@ mod tests {
     /// no row at all once the table has been dropped by the down migration.
     const FORCE_RLS_QUERY: &str =
         "SELECT relforcerowsecurity FROM pg_class WHERE relname = 'business_settings'";
+}
+
+#[cfg(test)]
+mod boundary_tests {
+    //! HTTP-boundary unit tests: status-code mapping and response JSON shape.
+    //! These need no database, so they live apart from the `#[sqlx::test]`
+    //! integration suite above.
+    //!
+    //! A full router `GET`/`PUT` round-trip is intentionally not here: the
+    //! handlers take `State<AppState>`, whose construction requires a live Redis
+    //! connection that `#[sqlx::test]` does not provision. The handler body is
+    //! covered by the `load_row`/`upsert_row` RLS tests and the domain serde
+    //! tests; this module pins the boundary translation those don't observe.
+
+    use super::{SettingsError, SettingsResponse};
+    use crate::domain::{BusinessSettingsRow, DomainError};
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse as _;
+
+    #[test]
+    fn settings_error_maps_to_expected_status() {
+        assert_eq!(
+            SettingsError::NotFound.into_response().status(),
+            StatusCode::NOT_FOUND,
+            "an unset config is 404"
+        );
+        assert_eq!(
+            SettingsError::Timeout.into_response().status(),
+            StatusCode::GATEWAY_TIMEOUT,
+            "a bounded-query timeout is 504, not 500"
+        );
+        assert_eq!(
+            SettingsError::Parse(DomainError::Empty("legal_name"))
+                .into_response()
+                .status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "an unexpected parse failure is 500"
+        );
+    }
+
+    #[test]
+    fn response_serializes_flat_with_timestamp() {
+        let row = BusinessSettingsRow {
+            legal_name: "Acme Print Co".to_owned(),
+            tax_code: Some("0312345678".to_owned()),
+            address: None,
+            phone: None,
+            email: None,
+            logo_url: None,
+            currency: "VND".to_owned(),
+            tax_rate_bps: 1000,
+            default_unit: "tờ".to_owned(),
+            updated_at: chrono::DateTime::from_timestamp(1_700_000_000, 0)
+                .expect("fixed timestamp is valid"),
+        };
+        let response = SettingsResponse::try_from(row).expect("a valid row converts");
+        let json = serde_json::to_value(&response).expect("response serializes");
+
+        // `settings` is flattened: its fields sit at the top level next to
+        // `updated_at`, with no nested "settings" object.
+        assert!(
+            json.get("settings").is_none(),
+            "settings must be flattened, not nested"
+        );
+        assert_eq!(json["legal_name"], "Acme Print Co");
+        assert_eq!(json["currency"], "VND");
+        assert_eq!(json["tax_rate_bps"], 1000);
+        assert!(
+            json.get("address").is_none(),
+            "absent optional fields are omitted"
+        );
+        assert!(
+            json["updated_at"]
+                .as_str()
+                .expect("updated_at serializes as a string")
+                .starts_with("2023-11-14T22:13:20"),
+            "updated_at renders as an RFC 3339 timestamp"
+        );
+    }
 }

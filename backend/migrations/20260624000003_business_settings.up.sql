@@ -28,17 +28,32 @@ CREATE TABLE business_settings (
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
 
-    -- Defense-in-depth: these CHECKs mirror the domain newtype invariants
-    -- (`backend/src/domain/settings.rs`) at the storage layer, so a bug that
-    -- bypasses the application path still cannot persist an out-of-range value.
+    -- Defense-in-depth: these CHECKs mirror the domain newtype constructors in
+    -- `backend/src/domain/settings.rs` (`bounded()`, `CurrencyCode`, `TaxRateBps`)
+    -- at the storage layer, so a write that bypasses the application path still
+    -- cannot persist a value the typed read would later reject (which would
+    -- surface as a 500 on `GET /settings`). Text caps use `octet_length` (bytes)
+    -- to match Rust's `str::len`, and `btrim(...) <> ''` rejects blank /
+    -- whitespace-only values exactly as `bounded()` does. Nullable columns admit
+    -- NULL (absent) but reject an empty/over-cap value when present.
     CONSTRAINT business_settings_tax_rate_bps_range
         CHECK (tax_rate_bps BETWEEN 0 AND 10000),
     CONSTRAINT business_settings_currency_format
         CHECK (currency ~ '^[A-Z]{3}$'),
-    CONSTRAINT business_settings_legal_name_len
-        CHECK (char_length(legal_name) BETWEEN 1 AND 200),
-    CONSTRAINT business_settings_default_unit_len
-        CHECK (char_length(default_unit) BETWEEN 1 AND 32)
+    CONSTRAINT business_settings_legal_name_valid
+        CHECK (btrim(legal_name) <> '' AND octet_length(legal_name) <= 200),
+    CONSTRAINT business_settings_default_unit_valid
+        CHECK (btrim(default_unit) <> '' AND octet_length(default_unit) <= 32),
+    CONSTRAINT business_settings_tax_code_valid
+        CHECK (tax_code IS NULL OR (btrim(tax_code) <> '' AND octet_length(tax_code) <= 20)),
+    CONSTRAINT business_settings_address_valid
+        CHECK (address IS NULL OR (btrim(address) <> '' AND octet_length(address) <= 300)),
+    CONSTRAINT business_settings_phone_valid
+        CHECK (phone IS NULL OR (btrim(phone) <> '' AND octet_length(phone) <= 32)),
+    CONSTRAINT business_settings_email_valid
+        CHECK (email IS NULL OR (btrim(email) <> '' AND octet_length(email) <= 254)),
+    CONSTRAINT business_settings_logo_url_valid
+        CHECK (logo_url IS NULL OR (btrim(logo_url) <> '' AND octet_length(logo_url) <= 512))
 );
 
 -- Row-Level Security backstop, identical in shape to `users` (migration
