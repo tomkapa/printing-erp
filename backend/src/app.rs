@@ -37,7 +37,13 @@ pub(crate) async fn run(settings: Settings) -> Result<(), ServerError> {
     let db = crate::db::connect(&settings.database).await?;
     let redis = connect_redis(&settings.redis).await?;
 
-    let state = AppState::new(db, redis, Arc::new(SystemClock));
+    // Built once at startup (CLAUDE.md §9); asserts the JWT secret length. The
+    // reset-token notifier is the dev stub until Notifications (#36) lands.
+    let auth = Arc::new(crate::auth::AuthContext::new(
+        &settings.auth,
+        Arc::new(crate::auth::LoggingNotifier),
+    ));
+    let state = AppState::new(db, redis, Arc::new(SystemClock), auth);
     let app = http::router(state);
 
     let address = settings.server.bind_address();

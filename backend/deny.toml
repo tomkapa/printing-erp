@@ -1,0 +1,40 @@
+# cargo-deny policy for the printing-erp backend (CLAUDE.md §3/§8: `cargo deny
+# check` and `cargo audit` are CI gates). Run from `backend/`:
+#
+#     cargo deny check
+#
+# Schema is the cargo-deny v2 format (cargo-deny >= 0.18).
+
+[advisories]
+# No `ignore` is needed here: `cargo deny` resolves advisories against the actual
+# build graph, which excludes the feature-disabled MySQL driver, so it never sees
+# the vulnerable `rsa` crate (RUSTSEC-2023-0071). `cargo audit`, by contrast,
+# scans Cargo.lock and *does* flag `rsa`; its suppression — with the full
+# rationale — lives in `.cargo/audit.toml`. If `rsa` ever enters the real graph
+# (e.g. someone enables the MySQL driver), this check will correctly fail.
+
+[licenses]
+# Permissive licenses present across the dependency tree. A new dependency on a
+# license not listed here fails the gate and must be reviewed.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+# Large async trees (axum + sqlx + opentelemetry) unavoidably pull duplicate
+# transitive versions; not actionable in app code (CLAUDE.md Cargo.toml note).
+multiple-versions = "allow"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

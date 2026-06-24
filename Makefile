@@ -5,7 +5,7 @@
 CARGO        := cargo --manifest-path backend/Cargo.toml
 DATABASE_URL ?= postgres://erp:erp@localhost:5432/erp
 
-.PHONY: up down logs migrate backend frontend frontend-install fmt lint test check clean
+.PHONY: up down logs migrate backend frontend frontend-install fmt lint test audit deny check clean
 
 up: ## Start PostgreSQL + Redis
 	docker compose up -d
@@ -36,6 +36,14 @@ lint: ## Clippy with warnings denied
 
 test: ## Run the Rust test suite (DATABASE_URL = admin role; #[sqlx::test] needs CREATEDB)
 	DATABASE_URL=$(DATABASE_URL) $(CARGO) test --all-features
+
+# Run from backend/ so cargo-audit and cargo-deny read .cargo/audit.toml and
+# deny.toml (the RUSTSEC-2023-0071 suppression + license/bans policy live there).
+audit: ## Scan dependencies for RustSec advisories (needs `cargo install cargo-audit`)
+	cd backend && cargo audit
+
+deny: ## Check advisories, licenses, bans, sources (needs `cargo install cargo-deny`)
+	cd backend && cargo deny check
 
 check: fmt lint test ## Format, lint and test
 

@@ -195,6 +195,7 @@ mod rls_tests {
     use crate::domain::TenantId;
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
     use sqlx::{Connection as _, PgConnection, PgPool};
+    use uuid::Uuid;
 
     /// Inserts a user inside the tenant's RLS context and commits.
     async fn seed_user(pool: &PgPool, tenant: TenantId, email: &str) {
@@ -213,6 +214,53 @@ mod rls_tests {
         .await
         .expect("insert user within tenant context");
         tx.commit().await.expect("commit user");
+    }
+
+    /// Inserts a user and a refresh token for it inside the tenant's context.
+    async fn seed_refresh_token(pool: &PgPool, tenant: TenantId, email: &str) {
+        let mut tx = begin_tenant_tx(pool, tenant)
+            .await
+            .expect("begin tenant tx");
+        let user_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO users (tenant_id, email, display_name, password_hash) \
+             VALUES ($1, $2, $3, $4) RETURNING id",
+        )
+        .bind(tenant.as_uuid())
+        .bind(email)
+        .bind("Test User")
+        .bind("argon2-hash")
+        .fetch_one(&mut *tx)
+        .await
+        .expect("insert user");
+        sqlx::query(
+            "INSERT INTO refresh_tokens \
+             (tenant_id, user_id, family_id, token_hash, issued_at, expires_at) \
+             VALUES ($1, $2, gen_random_uuid(), $3, now(), now() + interval '1 hour')",
+        )
+        .bind(tenant.as_uuid())
+        .bind(user_id)
+        .bind(vec![0_u8; 32])
+        .execute(&mut *tx)
+        .await
+        .expect("insert refresh token within tenant context");
+        tx.commit().await.expect("commit refresh token");
+    }
+
+    #[sqlx::test]
+    async fn refresh_tokens_are_tenant_isolated(opts: PgPoolOptions, conn: PgConnectOptions) {
+        let pool = app_pool(opts, conn).await;
+        let (a, b) = (new_tenant(), new_tenant());
+        seed_tenant(&pool, a, "tenant-a").await;
+        seed_tenant(&pool, b, "tenant-b").await;
+        seed_refresh_token(&pool, b, "bob@b.test").await;
+
+        // Tenant A's context must not see tenant B's refresh token.
+        let mut tx = begin_tenant_tx(&pool, a).await.expect("begin tenant tx");
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM refresh_tokens")
+            .fetch_one(&mut *tx)
+            .await
+            .expect("count refresh tokens");
+        assert_eq!(count, 0, "tenant A must not see tenant B's refresh tokens");
     }
 
     #[sqlx::test]
@@ -324,10 +372,64 @@ mod rls_tests {
         );
     }
 
+    #[sqlx::test]
+    async fn auth_tokens_migration_is_reversible(_opts: PgPoolOptions, conn: PgConnectOptions) {
+        // Reverting *to* the business-settings version undoes only the auth_tokens
+        // migration (the one applied after it). Assert the tables exist + are
+        // FORCE-protected, revert, assert they are gone, re-apply, assert they are
+        // back (CLAUDE.md §13).
+        let mut admin = PgConnection::connect_with(&conn)
+            .await
+            .expect("admin connection");
+
+        let forced_before: bool = sqlx::query_scalar(FORCE_REFRESH_TOKENS_QUERY)
+            .fetch_one(&mut admin)
+            .await
+            .expect("read refresh_tokens forcerowsecurity");
+        assert!(forced_before, "migration must leave FORCE RLS enabled");
+
+        migrator()
+            .undo(&mut admin, BUSINESS_SETTINGS_MIGRATION_VERSION)
+            .await
+            .expect("revert auth_tokens migration");
+        let table_after_undo: Option<String> = sqlx::query_scalar(REFRESH_TOKENS_REGCLASS_QUERY)
+            .fetch_one(&mut admin)
+            .await
+            .expect("read to_regclass after undo");
+        assert!(
+            table_after_undo.is_none(),
+            "down migration must drop refresh_tokens"
+        );
+
+        migrator()
+            .run(&mut admin)
+            .await
+            .expect("re-apply auth_tokens migration");
+        let forced_again: bool = sqlx::query_scalar(FORCE_REFRESH_TOKENS_QUERY)
+            .fetch_one(&mut admin)
+            .await
+            .expect("read refresh_tokens forcerowsecurity after re-apply");
+        assert!(
+            forced_again,
+            "re-applied migration must re-enable FORCE RLS"
+        );
+    }
+
     /// Version of the initial migration; reverting *to* it undoes the RLS one.
     const INIT_MIGRATION_VERSION: i64 = 20_260_623_000_001;
+
+    /// Version of the business-settings migration; reverting *to* it undoes the
+    /// auth_tokens migration that follows it.
+    const BUSINESS_SETTINGS_MIGRATION_VERSION: i64 = 20_260_624_000_003;
 
     /// Reads whether `users` has `FORCE ROW LEVEL SECURITY` set.
     const FORCE_RLS_QUERY: &str =
         "SELECT relforcerowsecurity FROM pg_class WHERE relname = 'users'";
+
+    /// Reads whether `refresh_tokens` has `FORCE ROW LEVEL SECURITY` set.
+    const FORCE_REFRESH_TOKENS_QUERY: &str =
+        "SELECT relforcerowsecurity FROM pg_class WHERE relname = 'refresh_tokens'";
+
+    /// Resolves `refresh_tokens` to its table OID name, or NULL if absent.
+    const REFRESH_TOKENS_REGCLASS_QUERY: &str = "SELECT to_regclass('refresh_tokens')::text";
 }

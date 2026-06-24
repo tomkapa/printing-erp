@@ -2,20 +2,18 @@
 //!
 //! `GET /settings` returns the requesting tenant's business configuration;
 //! `PUT /settings` creates or replaces it (an idempotent upsert — SPEC.md
-//! §Retry and idempotency). Both resolve the tenant via [`TenantScope`] and run
-//! inside a tenant-scoped transaction ([`db::begin_tenant_tx`]), so Row-Level
-//! Security keys every read and write to the caller's tenant.
-//!
-//! The same pre-auth caveat as [`crate::http::tenant`] applies: the tenant is
-//! read from the unauthenticated `X-Tenant-Id` header until auth lands.
+//! §Retry and idempotency). Both resolve the tenant from the authenticated
+//! [`AuthPrincipal`] and run inside a tenant-scoped transaction
+//! ([`db::begin_tenant_tx`]), so Row-Level Security keys every read and write to
+//! the caller's tenant.
 
 use crate::db;
 use crate::domain::{
     Address, BusinessSettings, BusinessSettingsRow, EmailAddress, LogoRef, Phone, TaxCode, TenantId,
 };
+use crate::http::AuthPrincipal;
 use crate::http::limits;
 use crate::http::state::AppState;
-use crate::http::tenant::TenantScope;
 use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -95,24 +93,27 @@ impl IntoResponse for SettingsError {
 /// `GET /settings` — the tenant's business configuration, or `404` if unset.
 pub(crate) async fn get_settings(
     State(state): State<AppState>,
-    TenantScope(tenant): TenantScope,
+    principal: AuthPrincipal,
 ) -> Result<Json<SettingsResponse>, SettingsError> {
-    let row = timeout(limits::SETTINGS_QUERY_TIMEOUT, load_row(&state.db, tenant))
-        .await
-        .map_err(|_| SettingsError::Timeout)??
-        .ok_or(SettingsError::NotFound)?;
+    let row = timeout(
+        limits::SETTINGS_QUERY_TIMEOUT,
+        load_row(&state.db, principal.tenant_id),
+    )
+    .await
+    .map_err(|_| SettingsError::Timeout)??
+    .ok_or(SettingsError::NotFound)?;
     Ok(Json(SettingsResponse::try_from(row)?))
 }
 
 /// `PUT /settings` — create or replace the tenant's business configuration.
 pub(crate) async fn put_settings(
     State(state): State<AppState>,
-    TenantScope(tenant): TenantScope,
+    principal: AuthPrincipal,
     Json(input): Json<BusinessSettings>,
 ) -> Result<Json<SettingsResponse>, SettingsError> {
     let row = timeout(
         limits::SETTINGS_QUERY_TIMEOUT,
-        upsert_row(&state.db, tenant, &input),
+        upsert_row(&state.db, principal.tenant_id, &input),
     )
     .await
     .map_err(|_| SettingsError::Timeout)??;

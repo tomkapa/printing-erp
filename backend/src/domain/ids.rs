@@ -10,8 +10,8 @@ use uuid::Uuid;
 /// the (untrusted) raw value.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub(crate) enum DomainError {
-    /// The raw string was not a syntactically valid UUID.
-    #[error("malformed identifier: {0}")]
+    /// The raw string was not a syntactically valid value of its kind.
+    #[error("malformed {0}")]
     Malformed(&'static str),
 
     /// The UUID was syntactically valid but nil (all-zero), which never names
@@ -32,6 +32,15 @@ pub(crate) enum DomainError {
         field: &'static str,
         /// The exclusive upper bound, in bytes.
         max: usize,
+    },
+
+    /// A value fell below its required minimum length.
+    #[error("{field} too short: min {min} bytes")]
+    TooShort {
+        /// Which field's floor was not met.
+        field: &'static str,
+        /// The inclusive lower bound, in bytes.
+        min: usize,
     },
 
     /// A numeric value fell outside its permitted range.
@@ -80,9 +89,65 @@ impl TryFrom<&str> for TenantId {
     }
 }
 
+/// Identifier of a [`User`](crate). Constructed only via [`TryFrom`], so it is
+/// always a non-nil UUID. Read it with [`UserId::as_uuid`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "Uuid")]
+pub(crate) struct UserId(Uuid);
+
+impl UserId {
+    /// The underlying UUID, for binding to SQL or rendering at the boundary.
+    pub(crate) const fn as_uuid(self) -> Uuid {
+        self.0
+    }
+}
+
+impl TryFrom<Uuid> for UserId {
+    type Error = DomainError;
+
+    fn try_from(raw: Uuid) -> Result<Self, Self::Error> {
+        if raw.is_nil() {
+            return Err(DomainError::Nil("user_id"));
+        }
+        Ok(Self(raw))
+    }
+}
+
+impl TryFrom<&str> for UserId {
+    type Error = DomainError;
+
+    fn try_from(raw: &str) -> Result<Self, Self::Error> {
+        let parsed = Uuid::parse_str(raw).map_err(|_| DomainError::Malformed("user_id"))?;
+        Self::try_from(parsed)
+    }
+}
+
+/// Identifier of a `refresh_tokens` row. Constructed only via [`TryFrom`], so it
+/// is always a non-nil UUID. Read it with [`RefreshTokenId::as_uuid`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct RefreshTokenId(Uuid);
+
+impl RefreshTokenId {
+    /// The underlying UUID, for binding to SQL.
+    pub(crate) const fn as_uuid(self) -> Uuid {
+        self.0
+    }
+}
+
+impl TryFrom<Uuid> for RefreshTokenId {
+    type Error = DomainError;
+
+    fn try_from(raw: Uuid) -> Result<Self, Self::Error> {
+        if raw.is_nil() {
+            return Err(DomainError::Nil("refresh_token_id"));
+        }
+        Ok(Self(raw))
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{DomainError, TenantId};
+    use super::{DomainError, RefreshTokenId, TenantId, UserId};
     use uuid::Uuid;
 
     #[test]
@@ -127,5 +192,31 @@ mod tests {
             result.is_err(),
             "nil uuid must not deserialize into a TenantId"
         );
+    }
+
+    #[test]
+    fn user_id_round_trips_and_rejects_nil() {
+        let raw = Uuid::from_u128(7);
+        let id = UserId::try_from(raw).expect("non-nil uuid is a valid user id");
+        assert_eq!(id.as_uuid(), raw);
+
+        let err = UserId::try_from(Uuid::nil()).expect_err("nil uuid must be rejected");
+        assert!(matches!(err, DomainError::Nil("user_id")));
+    }
+
+    #[test]
+    fn user_id_rejects_malformed_string() {
+        let err = UserId::try_from("nope").expect_err("malformed input must be rejected");
+        assert!(matches!(err, DomainError::Malformed("user_id")));
+    }
+
+    #[test]
+    fn refresh_token_id_round_trips_and_rejects_nil() {
+        let raw = Uuid::from_u128(9);
+        let id = RefreshTokenId::try_from(raw).expect("non-nil uuid is a valid id");
+        assert_eq!(id.as_uuid(), raw);
+
+        let err = RefreshTokenId::try_from(Uuid::nil()).expect_err("nil uuid must be rejected");
+        assert!(matches!(err, DomainError::Nil("refresh_token_id")));
     }
 }

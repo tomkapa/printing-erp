@@ -10,9 +10,13 @@
 
 mod ids;
 mod limits;
+mod password;
 mod settings;
+mod user;
 
-pub(crate) use ids::{DomainError, TenantId};
+pub(crate) use ids::{DomainError, RefreshTokenId, TenantId, UserId};
+pub(crate) use password::PlaintextPassword;
 pub(crate) use settings::{
     Address, BusinessSettings, BusinessSettingsRow, EmailAddress, LogoRef, Phone, TaxCode,
 };
+pub(crate) use user::{Email, Role, TenantSlug};
