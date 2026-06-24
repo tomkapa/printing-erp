@@ -14,7 +14,7 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 
-/// `POST /auth/login` — exchanges credentials for an access + refresh token pair.
+/// `POST /api/auth/login` — exchanges credentials for an access + refresh token pair.
 pub(crate) async fn login(
     State(state): State<AppState>,
     Json(request): Json<LoginRequest>,
@@ -23,7 +23,7 @@ pub(crate) async fn login(
     Ok(Json(pair))
 }
 
-/// `POST /auth/refresh` — rotates a refresh token for a fresh token pair.
+/// `POST /api/auth/refresh` — rotates a refresh token for a fresh token pair.
 pub(crate) async fn refresh(
     State(state): State<AppState>,
     Json(request): Json<RefreshRequest>,
@@ -32,7 +32,7 @@ pub(crate) async fn refresh(
     Ok(Json(pair))
 }
 
-/// `POST /auth/logout` — revokes the presented refresh token's session family.
+/// `POST /api/auth/logout` — revokes the presented refresh token's session family.
 pub(crate) async fn logout(
     State(state): State<AppState>,
     Json(request): Json<LogoutRequest>,
@@ -41,7 +41,7 @@ pub(crate) async fn logout(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// `POST /auth/password/forgot` — issues a reset token (always 200, no
+/// `POST /api/auth/password/forgot` — issues a reset token (always 200, no
 /// enumeration); the token is delivered out of band, never in the response.
 pub(crate) async fn password_forgot(
     State(state): State<AppState>,
@@ -51,7 +51,7 @@ pub(crate) async fn password_forgot(
     Ok(StatusCode::OK)
 }
 
-/// `POST /auth/password/reset` — consumes a reset token, sets the new password,
+/// `POST /api/auth/password/reset` — consumes a reset token, sets the new password,
 /// and revokes the user's refresh tokens.
 pub(crate) async fn password_reset(
     State(state): State<AppState>,

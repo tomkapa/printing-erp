@@ -5,9 +5,9 @@
 //! and bounds every I/O await with a timeout (CLAUDE.md §5). Bytes never transit
 //! the API: clients upload and download directly through presigned URLs.
 //!
-//! Flow: `POST /assets` records a `pending` row and returns a presigned PUT →
-//! the client uploads → `POST /assets/{id}/complete` HEAD-verifies and marks it
-//! `ready`. `GET /assets/{id}` returns a presigned download URL.
+//! Flow: `POST /api/assets` records a `pending` row and returns a presigned PUT →
+//! the client uploads → `POST /api/assets/{id}/complete` HEAD-verifies and marks it
+//! `ready`. `GET /api/assets/{id}` returns a presigned download URL.
 
 use crate::assets::limits as asset_limits;
 use crate::assets::{
@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use tokio::time::timeout;
 use uuid::Uuid;
 
-/// `POST /assets` request: the client declares what it is about to upload.
+/// `POST /api/assets` request: the client declares what it is about to upload.
 #[derive(Debug, Deserialize)]
 pub(crate) struct CreateAssetRequest {
     filename: FileName,
@@ -36,7 +36,7 @@ pub(crate) struct CreateAssetRequest {
     size_bytes: ByteSize,
 }
 
-/// `POST /assets` response: where and for how long to upload.
+/// `POST /api/assets` response: where and for how long to upload.
 #[derive(Debug, Serialize)]
 pub(crate) struct CreateAssetResponse {
     asset_id: AssetId,
@@ -57,7 +57,7 @@ pub(crate) struct AssetView {
     updated_at: DateTime<Utc>,
 }
 
-/// `GET /assets/{id}` response: metadata plus a presigned download URL.
+/// `GET /api/assets/{id}` response: metadata plus a presigned download URL.
 #[derive(Debug, Serialize)]
 pub(crate) struct AssetDetail {
     #[serde(flatten)]
@@ -66,7 +66,7 @@ pub(crate) struct AssetDetail {
     download_expires_in_secs: u64,
 }
 
-/// `GET /assets` pagination parameters.
+/// `GET /api/assets` pagination parameters.
 #[derive(Debug, Deserialize)]
 pub(crate) struct ListQuery {
     #[serde(default)]
@@ -75,7 +75,7 @@ pub(crate) struct ListQuery {
     offset: Option<i64>,
 }
 
-/// `POST /assets` — record a pending asset and issue a presigned upload URL.
+/// `POST /api/assets` — record a pending asset and issue a presigned upload URL.
 pub(crate) async fn create(
     State(state): State<AppState>,
     principal: AuthPrincipal,
@@ -122,7 +122,7 @@ pub(crate) async fn create(
     ))
 }
 
-/// `POST /assets/{id}/complete` — verify the uploaded bytes and mark `ready`.
+/// `POST /api/assets/{id}/complete` — verify the uploaded bytes and mark `ready`.
 pub(crate) async fn complete(
     State(state): State<AppState>,
     principal: AuthPrincipal,
@@ -159,7 +159,7 @@ pub(crate) async fn complete(
     Ok(Json(view_of(updated)))
 }
 
-/// `GET /assets` — list this tenant's non-deleted assets, newest first.
+/// `GET /api/assets` — list this tenant's non-deleted assets, newest first.
 pub(crate) async fn list(
     State(state): State<AppState>,
     principal: AuthPrincipal,
@@ -184,7 +184,7 @@ pub(crate) async fn list(
     Ok(Json(assets.into_iter().map(view_of).collect()))
 }
 
-/// `GET /assets/{id}` — metadata plus a short-lived presigned download URL.
+/// `GET /api/assets/{id}` — metadata plus a short-lived presigned download URL.
 pub(crate) async fn get_one(
     State(state): State<AppState>,
     principal: AuthPrincipal,
@@ -211,7 +211,7 @@ pub(crate) async fn get_one(
     }))
 }
 
-/// `DELETE /assets/{id}` — remove the bytes and soft-delete the row.
+/// `DELETE /api/assets/{id}` — remove the bytes and soft-delete the row.
 pub(crate) async fn delete(
     State(state): State<AppState>,
     principal: AuthPrincipal,
@@ -370,7 +370,11 @@ mod tests {
 
     /// Creates an asset and returns its id (as a `Uuid` string) and key.
     async fn create_asset(app: &Router, bearer: &str, tenant: TenantId) -> (String, StorageKey) {
-        let (status, body) = send(app.clone(), post_json("/assets", bearer, &create_body())).await;
+        let (status, body) = send(
+            app.clone(),
+            post_json("/api/assets", bearer, &create_body()),
+        )
+        .await;
         assert_eq!(status, StatusCode::CREATED, "create returns 201");
         let id = body["asset_id"]
             .as_str()
@@ -386,7 +390,11 @@ mod tests {
         conn: PgConnectOptions,
     ) {
         let (app, _store, bearer, _tenant) = setup(opts, conn).await;
-        let (status, body) = send(app.clone(), post_json("/assets", &bearer, &create_body())).await;
+        let (status, body) = send(
+            app.clone(),
+            post_json("/api/assets", &bearer, &create_body()),
+        )
+        .await;
 
         assert_eq!(status, StatusCode::CREATED);
         assert!(
@@ -398,7 +406,7 @@ mod tests {
         assert_eq!(body["expires_in_secs"].as_u64(), Some(900));
 
         // The pending asset is now listable.
-        let (list_status, list_body) = send(app, request("GET", "/assets", &bearer)).await;
+        let (list_status, list_body) = send(app, request("GET", "/api/assets", &bearer)).await;
         assert_eq!(list_status, StatusCode::OK);
         assert_eq!(list_body.as_array().map(Vec::len), Some(1));
         assert_eq!(list_body[0]["status"], "pending");
@@ -412,7 +420,7 @@ mod tests {
             "content_type": "text/plain",
             "size_bytes": 10,
         });
-        let (status, _) = send(app, post_json("/assets", &bearer, &body)).await;
+        let (status, _) = send(app, post_json("/api/assets", &bearer, &body)).await;
         // The `ContentType` newtype rejects it during JSON deserialization.
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     }
@@ -425,7 +433,7 @@ mod tests {
 
         let (status, body) = send(
             app,
-            request("POST", &format!("/assets/{id}/complete"), &bearer),
+            request("POST", &format!("/api/assets/{id}/complete"), &bearer),
         )
         .await;
         assert_eq!(status, StatusCode::OK);
@@ -440,7 +448,7 @@ mod tests {
 
         let (status, _) = send(
             app,
-            request("POST", &format!("/assets/{id}/complete"), &bearer),
+            request("POST", &format!("/api/assets/{id}/complete"), &bearer),
         )
         .await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
@@ -451,7 +459,7 @@ mod tests {
         let (app, _store, bearer, tenant) = setup(opts, conn).await;
         let (id, _key) = create_asset(&app, &bearer, tenant).await;
 
-        let (status, body) = send(app, request("GET", &format!("/assets/{id}"), &bearer)).await;
+        let (status, body) = send(app, request("GET", &format!("/api/assets/{id}"), &bearer)).await;
         assert_eq!(status, StatusCode::OK);
         assert!(
             body["download_url"]
@@ -469,12 +477,12 @@ mod tests {
 
         let (status, _) = send(
             app.clone(),
-            request("DELETE", &format!("/assets/{id}"), &bearer),
+            request("DELETE", &format!("/api/assets/{id}"), &bearer),
         )
         .await;
         assert_eq!(status, StatusCode::NO_CONTENT);
 
-        let (after, _) = send(app, request("GET", &format!("/assets/{id}"), &bearer)).await;
+        let (after, _) = send(app, request("GET", &format!("/api/assets/{id}"), &bearer)).await;
         assert_eq!(after, StatusCode::NOT_FOUND, "a deleted asset is gone");
     }
 
@@ -482,7 +490,7 @@ mod tests {
     async fn missing_bearer_is_rejected(opts: PgPoolOptions, conn: PgConnectOptions) {
         let (app, _store, _bearer, _tenant) = setup(opts, conn).await;
         let req = Request::builder()
-            .uri("/assets")
+            .uri("/api/assets")
             .body(Body::empty())
             .expect("build request");
         let (status, _) = send(app, req).await;
