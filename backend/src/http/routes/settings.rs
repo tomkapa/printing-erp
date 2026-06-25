@@ -769,7 +769,6 @@ mod authz_tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-    use tower::ServiceExt as _;
 
     const NON_ADMIN: [Role; 4] = [
         Role::Sales,
@@ -822,11 +821,7 @@ mod authz_tests {
 
     /// Sends `req` through a freshly-built router over a clone of `state`.
     async fn status(state: &AppState, req: Request<Body>) -> StatusCode {
-        crate::http::router(state.clone())
-            .oneshot(req)
-            .await
-            .expect("router responds")
-            .status()
+        testsupport::send(state, req).await.0
     }
 
     #[sqlx::test]

@@ -505,13 +505,11 @@ mod authz_tests {
     use crate::http::AppState;
     use crate::storage::InMemoryObjectStore;
     use crate::testsupport;
-    use crate::testsupport::bearer;
+    use crate::testsupport::{bearer, send};
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
-    use http_body_util::BodyExt as _;
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
     use std::sync::Arc;
-    use tower::ServiceExt as _;
 
     async fn setup(opts: PgPoolOptions, conn: PgConnectOptions) -> (AppState, UserId, TenantId) {
         let pool = testsupport::app_pool(opts, conn).await;
@@ -551,22 +549,6 @@ mod authz_tests {
             .header("authorization", bearer)
             .body(Body::empty())
             .expect("build request")
-    }
-
-    async fn send(state: &AppState, req: Request<Body>) -> (StatusCode, serde_json::Value) {
-        let response = crate::http::router(state.clone())
-            .oneshot(req)
-            .await
-            .expect("router responds");
-        let status = response.status();
-        let bytes = response
-            .into_body()
-            .collect()
-            .await
-            .expect("body")
-            .to_bytes();
-        let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
-        (status, json)
     }
 
     /// Creates a pending asset as admin and returns its id string.

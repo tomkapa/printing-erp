@@ -171,10 +171,10 @@ pub(crate) async fn list_users(
         "LIMIT must bound the row count"
     );
 
-    let mut views = Vec::with_capacity(rows.len());
-    for row in rows {
-        views.push(row_to_view(row)?);
-    }
+    let views = rows
+        .into_iter()
+        .map(row_to_view)
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(Json(views))
 }
 
@@ -199,6 +199,17 @@ pub(crate) async fn create_user(
     let row = timeout(limits::USER_QUERY_TIMEOUT, work)
         .await
         .map_err(|_| UsersError::Timeout)??;
+    // The INSERT … RETURNING must echo what we inserted (guards a column-order
+    // drift between the SQL projection and `UserRow`).
+    assert_eq!(
+        row.1,
+        request.email.as_str(),
+        "inserted row echoes the requested email"
+    );
+    assert_eq!(
+        row.3, request.role,
+        "inserted row carries the requested role"
+    );
     Ok((StatusCode::CREATED, Json(row_to_view(row)?)))
 }
 
@@ -228,6 +239,15 @@ pub(crate) async fn update_user(
     let row = timeout(limits::USER_QUERY_TIMEOUT, work)
         .await
         .map_err(|_| UsersError::Timeout)??;
+    // Post-conditions: the UPDATE … RETURNING returned the targeted row and the
+    // requested fields took effect (an absent field is left untouched).
+    assert_eq!(row.0, target.as_uuid(), "patch returned the targeted row");
+    if let Some(role) = request.role {
+        assert_eq!(row.3, role, "requested role is reflected");
+    }
+    if let Some(active) = request.is_active {
+        assert_eq!(row.4, active, "requested active state is reflected");
+    }
     Ok(Json(row_to_view(row)?))
 }
 
@@ -368,12 +388,10 @@ mod tests {
     use crate::domain::{Role, TenantId, UserId};
     use crate::http::AppState;
     use crate::testsupport;
-    use crate::testsupport::bearer;
+    use crate::testsupport::{bearer, send};
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
-    use http_body_util::BodyExt as _;
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-    use tower::ServiceExt as _;
 
     const PASSWORD: &str = "correct horse battery"; // ≥ 12 bytes
 
@@ -410,22 +428,6 @@ mod tests {
             builder = builder.header("authorization", value);
         }
         builder.body(Body::empty()).expect("build request")
-    }
-
-    async fn send(state: &AppState, req: Request<Body>) -> (StatusCode, serde_json::Value) {
-        let response = crate::http::router(state.clone())
-            .oneshot(req)
-            .await
-            .expect("router responds");
-        let status = response.status();
-        let bytes = response
-            .into_body()
-            .collect()
-            .await
-            .expect("body")
-            .to_bytes();
-        let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
-        (status, json)
     }
 
     fn create_body(email: &str, role: &str) -> serde_json::Value {

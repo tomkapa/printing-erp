@@ -134,3 +134,27 @@ pub(crate) fn bearer(state: &AppState, user: UserId, tenant: TenantId, role: Rol
         .expect("issue access token");
     format!("Bearer {token}")
 }
+
+/// Drives `req` through a freshly-built router over a clone of `state`, returning
+/// the status and the parsed JSON body (`Null` for an empty or non-JSON body).
+/// The HTTP route tests share this so the request/response plumbing lives once.
+pub(crate) async fn send(
+    state: &AppState,
+    req: axum::http::Request<axum::body::Body>,
+) -> (axum::http::StatusCode, serde_json::Value) {
+    use http_body_util::BodyExt as _;
+    use tower::ServiceExt as _;
+    let response = crate::http::router(state.clone())
+        .oneshot(req)
+        .await
+        .expect("router responds");
+    let status = response.status();
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect body")
+        .to_bytes();
+    let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    (status, json)
+}
