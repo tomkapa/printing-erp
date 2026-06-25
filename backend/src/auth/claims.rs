@@ -44,7 +44,8 @@ pub(crate) struct AccessClaims {
     pub(crate) sub: UserId,
     /// Tenant the user is acting within; drives Row-Level Security downstream.
     pub(crate) tid: TenantId,
-    /// The user's role (carried for RBAC, #13; not enforced here).
+    /// The user's role. Carried here; authorization is enforced downstream by
+    /// the [`Require`](crate::http::Require) guard against the `authz` policy (#13).
     pub(crate) role: Role,
     /// Issued-at, unix seconds.
     pub(crate) iat: i64,

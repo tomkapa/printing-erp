@@ -64,7 +64,7 @@ impl AppState {
     }
 }
 
-/// Lets extractors (e.g. `AuthPrincipal`) pull just the auth context from state.
+/// Lets extractors (e.g. the `Require` guard) pull just the auth context from state.
 impl FromRef<AppState> for Arc<AuthContext> {
     fn from_ref(state: &AppState) -> Self {
         state.auth.clone()

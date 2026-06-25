@@ -33,3 +33,20 @@ pub(crate) const TENANT_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
 /// Upper bound on a business-settings read/upsert round-trip (CLAUDE.md §5).
 /// A single-row keyed access; the same rationale as [`TENANT_QUERY_TIMEOUT`].
 pub(crate) const SETTINGS_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Upper bound on a user-management DB round-trip (CLAUDE.md §5). A tenant's
+/// roster is small and every access is keyed or a short page; the same rationale
+/// as [`TENANT_QUERY_TIMEOUT`].
+pub(crate) const USER_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Largest page the user-list endpoint returns (CLAUDE.md §5: every batch is
+/// capped). A tenant's user roster is small, so 100 is generous.
+pub(crate) const MAX_USERS_PER_PAGE: i64 = 100;
+
+/// Default user page size when the caller does not specify one.
+pub(crate) const DEFAULT_USERS_PER_PAGE: i64 = 50;
+
+/// Largest accepted user-list offset (CLAUDE.md §5: every scan is bounded). At
+/// 100 rows/page this is 100 pages deep — far past any realistic roster — while
+/// stopping a client from forcing an unbounded `OFFSET` scan.
+pub(crate) const MAX_USERS_OFFSET: i64 = 100 * MAX_USERS_PER_PAGE;

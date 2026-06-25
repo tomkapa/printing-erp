@@ -1,12 +1,12 @@
 //! HTTP router assembly and global middleware.
 
 use super::limits;
-use super::routes::{assets, auth, health, settings, tenant};
+use super::routes::{assets, auth, health, settings, tenant, users};
 use super::state::AppState;
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::http::StatusCode;
-use axum::routing::{get, post};
+use axum::routing::{get, patch, post};
 use tower_http::cors::CorsLayer;
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
@@ -27,7 +27,7 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/auth/password/forgot", post(auth::password_forgot))
         .route("/auth/password/reset", post(auth::password_reset))
         // Authenticated tenant echo: resolves the tenant from a verified access
-        // token (`AuthPrincipal`) and reports its RLS-visible user count.
+        // token (via the `Require` guard) and reports its RLS-visible user count.
         .route("/tenant/me", get(tenant::me))
         // Asset upload/download. Bytes move out of band via presigned URLs, so
         // these endpoints carry only small JSON metadata.
@@ -35,11 +35,15 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/assets/{id}", get(assets::get_one).delete(assets::delete))
         .route("/assets/{id}/complete", post(assets::complete))
         // Per-tenant business configuration (logo, identity, tax, currency,
-        // default unit). Authenticated via the same `AuthPrincipal` extractor.
+        // default unit). Authorized via the same `Require` guard.
         .route(
             "/settings",
             get(settings::get_settings).put(settings::put_settings),
         )
+        // User management ("role center"): list/create/modify tenant users and
+        // their roles. Admin-only, enforced by the `Require<ManageUsers>` guard.
+        .route("/users", post(users::create_user).get(users::list_users))
+        .route("/users/{id}", patch(users::update_user))
         .layer(TraceLayer::new_for_http())
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
