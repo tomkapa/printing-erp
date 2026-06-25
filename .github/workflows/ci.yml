@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+# Actions are pinned to commit SHAs (supply-chain hardening; .github/dependabot.yml
+# keeps them current). The trailing comment is the human-readable version.
+jobs:
+  # Backend exit gates (CLAUDE.md §3) against a real Postgres + Redis.
+  backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: erp
+          POSTGRES_PASSWORD: erp
+          POSTGRES_DB: erp
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U erp -d erp"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+    env:
+      # Admin role: #[sqlx::test] creates an ephemeral DB per test from this URL.
+      DATABASE_URL: postgres://erp:erp@localhost:5432/erp
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: backend
+      - name: Provision erp_app role (least-privilege, RLS)
+        # migrations/20260623000002 grants to erp_app, so it must exist before
+        # any #[sqlx::test] applies the embedded migrations.
+        run: |
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends postgresql-client
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f ../db/init/00-app-role.sql
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: cargo check --all-targets --all-features
+      - run: cargo test --all-features
+      - name: Install supply-chain tools
+        uses: taiki-e/install-action@ace6ebe54a6a0c86dfb5f7764b17f793b6925bc3 # v2
+        with:
+          tool: cargo-deny,cargo-audit
+      # `licenses` is skipped until the team adds a deny.toml allowlist; advisories,
+      # bans and sources run with cargo-deny defaults (RustSec + crates.io).
+      - run: cargo deny check advisories bans sources
+      - run: cargo audit
+
+  # Frontend type-check + build (bun run build == tsc && vite build).
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+      - run: bun install --frozen-lockfile
+      - run: bun run build
+
+  # Chart lint + render (default values and the full-feature CI values).
+  helm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
+      - run: helm lint deploy/chart
+      - run: helm template erp deploy/chart
+      - run: helm template erp deploy/chart -f deploy/chart/ci/full-values.yaml

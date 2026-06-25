@@ -221,7 +221,7 @@ impl TryFrom<u16> for TaxRateBps {
 
 /// A tenant's validated business configuration.
 ///
-/// This is the `PUT /settings` request body (deserialized through each field's
+/// This is the `PUT /api/settings` request body (deserialized through each field's
 /// smart constructor) and the core of the `GET`/`PUT` response. Optional fields
 /// are absent rather than empty: an omitted JSON key and a `NULL` column both
 /// map to `None`.

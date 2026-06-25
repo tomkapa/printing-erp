@@ -1,0 +1,34 @@
+# Placeholder values used by CI to render every conditional path of the chart
+# (ingress, external secret, redis). No real hostnames or secrets.
+externalSecret:
+  enabled: true
+  data:
+    - secretKey: APP__DATABASE__URL
+      remoteRef:
+        key: printing-erp/ci
+        property: database_url
+    - secretKey: APP__AUTH__JWT_SECRET
+      remoteRef:
+        key: printing-erp/ci
+        property: jwt_secret
+
+config:
+  APP__STORAGE__REGION: auto
+  APP__STORAGE__BUCKET: printing-erp-ci
+  APP__REDIS__URL: redis://printing-erp-redis:6379
+
+redis:
+  enabled: true
+
+imagePullSecrets:
+  - name: ghcr-pull-secret
+
+ingress:
+  enabled: true
+  host: chart-example.local
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-staging
+  tls:
+    - secretName: printing-erp-tls
+      hosts:
+        - chart-example.local

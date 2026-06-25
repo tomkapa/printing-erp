@@ -17,7 +17,7 @@ use axum::http::StatusCode;
 use serde::Serialize;
 use tokio::time::timeout;
 
-/// Body of the `GET /tenant/me` response.
+/// Body of the `GET /api/tenant/me` response.
 #[derive(Debug, Serialize)]
 pub(crate) struct TenantMeBody {
     tenant_id: TenantId,
@@ -27,7 +27,7 @@ pub(crate) struct TenantMeBody {
     user_count: i64,
 }
 
-/// `GET /tenant/me` — echoes the authenticated principal and its RLS-visible
+/// `GET /api/tenant/me` — echoes the authenticated principal and its RLS-visible
 /// user count.
 pub(crate) async fn me(
     State(state): State<AppState>,
@@ -81,11 +81,13 @@ mod tests {
     use tower::ServiceExt as _;
 
     fn app(state: AppState) -> Router {
-        Router::new().route("/tenant/me", get(me)).with_state(state)
+        Router::new()
+            .route("/api/tenant/me", get(me))
+            .with_state(state)
     }
 
     async fn get_me(state: AppState, authorization: Option<String>) -> StatusCode {
-        let mut builder = Request::builder().uri("/tenant/me");
+        let mut builder = Request::builder().uri("/api/tenant/me");
         if let Some(value) = authorization {
             builder = builder.header("authorization", value);
         }
@@ -113,7 +115,7 @@ mod tests {
                 .await;
         let auth = bearer(&state, user, tenant, Role::Admin);
         let req = Request::builder()
-            .uri("/tenant/me")
+            .uri("/api/tenant/me")
             .header("authorization", auth)
             .body(Body::empty())
             .expect("request");
@@ -179,7 +181,7 @@ mod tests {
                 .await;
         let auth = bearer(&state, user_a, a, Role::Admin);
         let req = Request::builder()
-            .uri("/tenant/me")
+            .uri("/api/tenant/me")
             .header("authorization", auth)
             .body(Body::empty())
             .expect("request");

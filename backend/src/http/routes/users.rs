@@ -29,7 +29,7 @@ use thiserror::Error;
 use tokio::time::timeout;
 use uuid::Uuid;
 
-/// `POST /users` request: an admin provisions a teammate with an initial password.
+/// `POST /api/users` request: an admin provisions a teammate with an initial password.
 #[derive(Debug, Deserialize)]
 pub(crate) struct CreateUserRequest {
     email: Email,
@@ -38,7 +38,7 @@ pub(crate) struct CreateUserRequest {
     password: PlaintextPassword,
 }
 
-/// `PATCH /users/{id}` request: change role and/or active state. Both are
+/// `PATCH /api/users/{id}` request: change role and/or active state. Both are
 /// optional, but at least one must be present (an empty patch is `422`).
 #[derive(Debug, Deserialize)]
 pub(crate) struct UpdateUserRequest {
@@ -48,7 +48,7 @@ pub(crate) struct UpdateUserRequest {
     is_active: Option<bool>,
 }
 
-/// `GET /users` pagination parameters.
+/// `GET /api/users` pagination parameters.
 #[derive(Debug, Deserialize)]
 pub(crate) struct ListQuery {
     #[serde(default)]
@@ -137,7 +137,7 @@ impl IntoResponse for UsersError {
     }
 }
 
-/// `GET /users` — list this tenant's users, newest first, paginated.
+/// `GET /api/users` — list this tenant's users, newest first, paginated.
 pub(crate) async fn list_users(
     State(state): State<AppState>,
     guard: Require<ManageUsers>,
@@ -178,7 +178,7 @@ pub(crate) async fn list_users(
     Ok(Json(views))
 }
 
-/// `POST /users` — create a user with an admin-set initial password.
+/// `POST /api/users` — create a user with an admin-set initial password.
 pub(crate) async fn create_user(
     State(state): State<AppState>,
     guard: Require<ManageUsers>,
@@ -213,7 +213,7 @@ pub(crate) async fn create_user(
     Ok((StatusCode::CREATED, Json(row_to_view(row)?)))
 }
 
-/// `PATCH /users/{id}` — change a user's role and/or active state.
+/// `PATCH /api/users/{id}` — change a user's role and/or active state.
 pub(crate) async fn update_user(
     State(state): State<AppState>,
     guard: Require<ManageUsers>,
@@ -443,7 +443,7 @@ mod tests {
     async fn create_as_admin(state: &AppState, admin: &str, email: &str, role: &str) -> String {
         let (status, body) = send(
             state,
-            json_request("POST", "/users", admin, &create_body(email, role)),
+            json_request("POST", "/api/users", admin, &create_body(email, role)),
         )
         .await;
         assert_eq!(status, StatusCode::CREATED, "admin creates a user");
@@ -459,7 +459,7 @@ mod tests {
             &state,
             json_request(
                 "POST",
-                "/users",
+                "/api/users",
                 &admin,
                 &create_body("sales@acme.test", "sales"),
             ),
@@ -476,7 +476,8 @@ mod tests {
         );
 
         // The new user plus the seeded admin are both listed.
-        let (list_status, list) = send(&state, empty_request("GET", "/users", Some(&admin))).await;
+        let (list_status, list) =
+            send(&state, empty_request("GET", "/api/users", Some(&admin))).await;
         assert_eq!(list_status, StatusCode::OK);
         assert_eq!(list.as_array().map(Vec::len), Some(2), "admin + new user");
     }
@@ -496,7 +497,7 @@ mod tests {
         });
         let (status, body) = send(
             &state,
-            json_request("POST", "/auth/login", "ignored", &login),
+            json_request("POST", "/api/auth/login", "ignored", &login),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "the created user can log in");
@@ -516,7 +517,7 @@ mod tests {
             &state,
             json_request(
                 "POST",
-                "/users",
+                "/api/users",
                 &admin,
                 &create_body("dup@acme.test", "operator"),
             ),
@@ -545,8 +546,11 @@ mod tests {
         .await;
         let admin_token_b = bearer(&state, admin_b, tenant_b, Role::Admin);
 
-        let (status, list) =
-            send(&state, empty_request("GET", "/users", Some(&admin_token_b))).await;
+        let (status, list) = send(
+            &state,
+            empty_request("GET", "/api/users", Some(&admin_token_b)),
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(
             list.as_array().map(Vec::len),
@@ -565,7 +569,7 @@ mod tests {
             &state,
             json_request(
                 "PATCH",
-                &format!("/users/{id}"),
+                &format!("/api/users/{id}"),
                 &admin,
                 &serde_json::json!({"role": "coordinator"}),
             ),
@@ -586,7 +590,7 @@ mod tests {
             &state,
             json_request(
                 "PATCH",
-                &format!("/users/{id}"),
+                &format!("/api/users/{id}"),
                 &admin,
                 &serde_json::json!({"is_active": false}),
             ),
@@ -606,7 +610,7 @@ mod tests {
             &state,
             json_request(
                 "PATCH",
-                &format!("/users/{missing}"),
+                &format!("/api/users/{missing}"),
                 &admin,
                 &serde_json::json!({"role": "sales"}),
             ),
@@ -624,7 +628,7 @@ mod tests {
             &state,
             json_request(
                 "PATCH",
-                &format!("/users/{id}"),
+                &format!("/api/users/{id}"),
                 &admin,
                 &serde_json::json!({}),
             ),
@@ -647,7 +651,8 @@ mod tests {
             Role::Operator,
         ] {
             let token = bearer(&state, user_id, tenant, role);
-            let (get_status, _) = send(&state, empty_request("GET", "/users", Some(&token))).await;
+            let (get_status, _) =
+                send(&state, empty_request("GET", "/api/users", Some(&token))).await;
             assert_eq!(
                 get_status,
                 StatusCode::FORBIDDEN,
@@ -658,7 +663,7 @@ mod tests {
                 &state,
                 json_request(
                     "POST",
-                    "/users",
+                    "/api/users",
                     &token,
                     &create_body("x@acme.test", "sales"),
                 ),
@@ -675,7 +680,7 @@ mod tests {
                 &state,
                 json_request(
                     "PATCH",
-                    &format!("/users/{some_id}"),
+                    &format!("/api/users/{some_id}"),
                     &token,
                     &serde_json::json!({"role": "sales"}),
                 ),
@@ -694,13 +699,13 @@ mod tests {
         let (state, _admin, _tenant) = setup(opts, conn).await;
         // Authn precedes authz: no token is 401, and must not leak (via 403) that
         // the route needs ManageUsers.
-        let (status, _) = send(&state, empty_request("GET", "/users", None)).await;
+        let (status, _) = send(&state, empty_request("GET", "/api/users", None)).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 
     /// Reads one user's `(role, is_active)` from the listing, by id.
     async fn user_state(state: &AppState, admin: &str, id: &str) -> (String, bool) {
-        let (status, list) = send(state, empty_request("GET", "/users", Some(admin))).await;
+        let (status, list) = send(state, empty_request("GET", "/api/users", Some(admin))).await;
         assert_eq!(status, StatusCode::OK);
         let entry = list
             .as_array()
@@ -725,7 +730,7 @@ mod tests {
             &state,
             json_request(
                 "PATCH",
-                &format!("/users/{id}"),
+                &format!("/api/users/{id}"),
                 &admin,
                 &serde_json::json!({"role": "operator"}),
             ),
@@ -749,7 +754,7 @@ mod tests {
             &state,
             json_request(
                 "PATCH",
-                &format!("/users/{id}"),
+                &format!("/api/users/{id}"),
                 &admin,
                 &serde_json::json!({"is_active": false}),
             ),
@@ -789,7 +794,7 @@ mod tests {
             &state,
             json_request(
                 "PATCH",
-                &format!("/users/{id}"),
+                &format!("/api/users/{id}"),
                 &admin,
                 &serde_json::json!({"role": "sales"}),
             ),
@@ -823,7 +828,7 @@ mod tests {
             &state,
             json_request(
                 "PATCH",
-                &format!("/users/{id}"),
+                &format!("/api/users/{id}"),
                 &admin,
                 &serde_json::json!({"role": "operator"}),
             ),
@@ -860,7 +865,7 @@ mod tests {
                     &state,
                     json_request(
                         "PATCH",
-                        &format!("/users/{id}"),
+                        &format!("/api/users/{id}"),
                         &token,
                         &serde_json::json!({"role": "operator"}),
                     ),

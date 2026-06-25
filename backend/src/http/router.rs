@@ -13,13 +13,18 @@ use tower_http::trace::TraceLayer;
 
 /// Builds the application router with health routes and the middleware stack.
 ///
+/// Business routes are nested under `/api` so they share no path namespace with
+/// the SPA, which is served at `/` and does its own client-side routing — a UI
+/// route like `/settings` must not collide with the API. Health endpoints stay
+/// at the top level for infrastructure probes (the Ingress routes only `/api`
+/// and `/health` to this service).
+///
 /// Middleware applies the cross-cutting limits from [`limits`]: a per-request
 /// timeout, a body-size cap, and HTTP tracing that opens a root span per
-/// request (CLAUDE.md §2, §5).
+/// request (CLAUDE.md §2, §5). It wraps every route, `/health` included.
 pub(crate) fn router(state: AppState) -> Router {
-    Router::new()
-        .route("/health/live", get(health::live))
-        .route("/health/ready", get(health::ready))
+    // Business surface, mounted under `/api` below.
+    let api = Router::new()
         // Authentication (unauthenticated entry points).
         .route("/auth/login", post(auth::login))
         .route("/auth/refresh", post(auth::refresh))
@@ -43,7 +48,12 @@ pub(crate) fn router(state: AppState) -> Router {
         // User management ("role center"): list/create/modify tenant users and
         // their roles. Admin-only, enforced by the `Require<ManageUsers>` guard.
         .route("/users", post(users::create_user).get(users::list_users))
-        .route("/users/{id}", patch(users::update_user))
+        .route("/users/{id}", patch(users::update_user));
+
+    Router::new()
+        .route("/health/live", get(health::live))
+        .route("/health/ready", get(health::ready))
+        .nest("/api", api)
         .layer(TraceLayer::new_for_http())
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,

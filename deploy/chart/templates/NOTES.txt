@@ -1,0 +1,30 @@
+printing-erp {{ .Chart.AppVersion }} deployed as release "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
+
+Components:
+  - backend  : {{ include "printing-erp.fullname" . }}-backend  (API, port {{ .Values.backend.service.port }})
+  {{- if .Values.frontend.enabled }}
+  - frontend : {{ include "printing-erp.fullname" . }}-frontend (SPA, port {{ .Values.frontend.service.port }})
+  {{- end }}
+  {{- if .Values.redis.enabled }}
+  - redis    : {{ include "printing-erp.fullname" . }}-redis    (EPHEMERAL — previews only)
+  {{- end }}
+
+{{- if .Values.ingress.enabled }}
+
+Reach it at: http{{ if .Values.ingress.tls }}s{{ end }}://{{ .Values.ingress.host }}
+  API prefixes routed to the backend: {{ join ", " .Values.ingress.backendPaths }}
+{{- else }}
+
+Ingress is disabled. Port-forward to try it locally:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "printing-erp.fullname" . }}-backend {{ .Values.backend.service.port }}:{{ .Values.backend.service.port }}
+  curl localhost:{{ .Values.backend.service.port }}/health/ready
+{{- end }}
+
+{{- if not (include "printing-erp.hasSecret" .) }}
+
+WARNING: no secret source configured (externalSecret.enabled / existingSecret).
+The backend needs APP__DATABASE__URL, APP__REDIS__URL, APP__STORAGE__ACCESS_KEY_ID,
+APP__STORAGE__SECRET_ACCESS_KEY and APP__AUTH__JWT_SECRET to start
+(APP__DATABASE__ADMIN_URL is optional — it falls back to APP__DATABASE__URL).
+Provide them via a secret store before expecting the pod to become ready.
+{{- end }}

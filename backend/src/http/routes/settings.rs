@@ -1,7 +1,7 @@
 //! Business-configuration routes (Issue #15).
 //!
-//! `GET /settings` returns the requesting tenant's business configuration;
-//! `PUT /settings` creates or replaces it (an idempotent upsert — SPEC.md
+//! `GET /api/settings` returns the requesting tenant's business configuration;
+//! `PUT /api/settings` creates or replaces it (an idempotent upsert — SPEC.md
 //! §Retry and idempotency). Both resolve the tenant from the authenticated
 //! principal (via the [`Require`] guard) and run inside a tenant-scoped transaction
 //! ([`db::begin_tenant_tx`]), so Row-Level Security keys every read and write to
@@ -94,7 +94,7 @@ impl IntoResponse for SettingsError {
     }
 }
 
-/// `GET /settings` — the tenant's business configuration, or `404` if unset.
+/// `GET /api/settings` — the tenant's business configuration, or `404` if unset.
 pub(crate) async fn get_settings(
     State(state): State<AppState>,
     guard: Require<ReadSettings>,
@@ -112,7 +112,7 @@ pub(crate) async fn get_settings(
     Ok(Json(response))
 }
 
-/// `PUT /settings` — create or replace the tenant's business configuration.
+/// `PUT /api/settings` — create or replace the tenant's business configuration.
 pub(crate) async fn put_settings(
     State(state): State<AppState>,
     guard: Require<WriteSettings>,
@@ -575,7 +575,7 @@ mod boundary_tests {
 mod handler_tests {
     //! HTTP-handler tests for logo resolution (issue #16 integration).
     //!
-    //! Exercises `GET`/`PUT /settings` resolving a stored asset ID to a presigned
+    //! Exercises `GET`/`PUT /api/settings` resolving a stored asset ID to a presigned
     //! download URL. Requests carry a real Bearer access token; the in-memory
     //! object store stands in for S3 (no Docker), over real Postgres and Redis.
 
@@ -681,7 +681,7 @@ mod handler_tests {
     fn put(bearer: &str, body: &serde_json::Value) -> Request<Body> {
         Request::builder()
             .method("PUT")
-            .uri("/settings")
+            .uri("/api/settings")
             .header("authorization", bearer)
             .header("content-type", "application/json")
             .body(Body::from(body.to_string()))
@@ -691,7 +691,7 @@ mod handler_tests {
     fn get(bearer: &str) -> Request<Body> {
         Request::builder()
             .method("GET")
-            .uri("/settings")
+            .uri("/api/settings")
             .header("authorization", bearer)
             .body(Body::empty())
             .expect("build GET")
@@ -706,7 +706,7 @@ mod handler_tests {
         let uploader = sole_user(&pool, tenant).await;
         let asset_id = seed_ready_logo(&pool, tenant, uploader).await;
 
-        // PUT /settings with the asset UUID as logo_url.
+        // PUT /api/settings with the asset UUID as logo_url.
         let put_body = serde_json::json!({
             "legal_name": "Acme Print Co",
             "currency": "VND",
@@ -715,11 +715,11 @@ mod handler_tests {
             "logo_url": asset_id,
         });
         let (put_status, _) = send(app.clone(), put(&bearer, &put_body)).await;
-        assert_eq!(put_status, StatusCode::OK, "PUT /settings succeeds");
+        assert_eq!(put_status, StatusCode::OK, "PUT /api/settings succeeds");
 
-        // GET /settings must include logo_download_url resolved to a presigned URL.
+        // GET /api/settings must include logo_download_url resolved to a presigned URL.
         let (get_status, body) = send(app, get(&bearer)).await;
-        assert_eq!(get_status, StatusCode::OK, "GET /settings succeeds");
+        assert_eq!(get_status, StatusCode::OK, "GET /api/settings succeeds");
         assert_eq!(
             body["logo_url"], asset_id,
             "logo_url echoes the stored asset id"
@@ -801,7 +801,7 @@ mod authz_tests {
         });
         let mut builder = Request::builder()
             .method("PUT")
-            .uri("/settings")
+            .uri("/api/settings")
             .header("content-type", "application/json");
         if let Some(value) = authorization {
             builder = builder.header("authorization", value);
@@ -813,7 +813,7 @@ mod authz_tests {
 
     fn get(authorization: &str) -> Request<Body> {
         Request::builder()
-            .uri("/settings")
+            .uri("/api/settings")
             .header("authorization", authorization)
             .body(Body::empty())
             .expect("build GET")
