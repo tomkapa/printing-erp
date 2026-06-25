@@ -122,3 +122,15 @@ pub(crate) async fn seed_user(
     tx.commit().await.expect("commit user");
     UserId::try_from(id).expect("seeded user id is non-nil")
 }
+
+/// Mints a `Bearer <token>` header authenticating `user`/`tenant`/`role`, valid
+/// at the test [`epoch`]. The route tests share this so the RBAC matrix can act
+/// as any role without reseeding — the guard reads the token's role claim, not
+/// the stored row.
+pub(crate) fn bearer(state: &AppState, user: UserId, tenant: TenantId, role: Role) -> String {
+    let token = state
+        .auth()
+        .issue_access(user, tenant, role, epoch())
+        .expect("issue access token");
+    format!("Bearer {token}")
+}

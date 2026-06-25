@@ -29,6 +29,10 @@ pub(crate) use error::AuthError;
 pub(crate) use login::{LoginRequest, login};
 pub(crate) use logout::{LogoutRequest, logout};
 pub(crate) use notifier::LoggingNotifier;
+// Exposed so the user-management API (RBAC, #13) hashes an admin-set initial
+// password through the exact same argon2id path as login, rather than
+// duplicating the parameters.
+pub(crate) use password::{PasswordError, hash_password};
 pub(crate) use refresh::{RefreshRequest, refresh};
 pub(crate) use reset::{ForgotRequest, ResetRequest, forgot_password, reset_password};
 pub(crate) use session::TokenPair;

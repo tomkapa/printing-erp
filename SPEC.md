@@ -61,6 +61,34 @@ tenant-scoped table compares `tenant_id` to that GUC — an unset GUC sees no ro
 and `NOBYPASSRLS`** (superusers bypass RLS entirely): the app serves as the
 least-privilege `erp_app` role and runs migrations as the admin `erp` role.
 
+## Authorization (RBAC)
+
+Tenancy answers *which tenant's data* a request may touch; **role-based access
+control** answers *what a user may do within it*. A verified access token carries
+the user's `Role` (`admin`, `sales`, `coordinator`, `scheduler`, `operator`); the
+HTTP layer turns that into a decision before any handler body runs.
+
+The policy is one pure, exhaustively-matched function, `authz::permits(role,
+permission) -> bool` — the single source of truth, **default-deny** (a role holds
+only the permissions it lists; `admin` holds all). Each guarded route names the
+capability it needs via a typed extractor, `Require<C>`, which authenticates
+first (a missing/invalid token is `401`) and then checks the role (a permitted
+role proceeds; otherwise `403`). The matrix today:
+
+| Permission | admin | sales | coordinator | scheduler | operator |
+| --- | :-: | :-: | :-: | :-: | :-: |
+| read tenant / settings / assets | ✓ | ✓ | ✓ | ✓ | ✓ |
+| create assets | ✓ | ✓ | ✓ | | |
+| delete assets | ✓ | | ✓ | | |
+| write settings | ✓ | | | | |
+| manage users (role center) | ✓ | | | | |
+
+Roles are assigned through the admin-only user-management API (`/users`). A
+**last-admin guard** — enforced in application code under a row lock, not a DB
+constraint — refuses any change that would leave a tenant with no active admin.
+New permissions are added as the pipeline (estimates → orders → jobs → …) lands,
+each as a `Permission` variant wired to the routes it gates.
+
 ## Retry and idempotency
 
 State-changing operations are designed to be safely retryable. Long-running
@@ -74,6 +102,9 @@ see CLAUDE.md §6).
 
 Scaffold stage. Implemented so far: the multi-tenant foundation
 (`tenants`, `users`, and **Row-Level Security** enforced via the `erp_app`
-serving role) and the platform skeleton (config, telemetry, DB pool, health
-probes). Subsequent migrations introduce the entities above following the
-pipeline order, each repeating the RLS pattern on its tenant-scoped tables.
+serving role), the platform skeleton (config, telemetry, DB pool, health
+probes), authentication (passwords, JWT access + rotating refresh tokens), and
+**role-based access control** (the `authz` policy + `Require` route guards + the
+admin user-management API). Subsequent migrations introduce the entities above
+following the pipeline order, each repeating the RLS pattern on its
+tenant-scoped tables.

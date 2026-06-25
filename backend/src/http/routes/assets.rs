@@ -1,6 +1,7 @@
 //! Asset upload/download routes.
 //!
-//! Every handler resolves the tenant from the authenticated [`AuthPrincipal`],
+//! Every handler resolves the tenant from the authenticated principal (via the
+//! [`Require`] guard, which also enforces the caller's role — RBAC, issue #13),
 //! runs DB work inside a [`db::begin_tenant_tx`] (so Row-Level Security applies),
 //! and bounds every I/O await with a timeout (CLAUDE.md §5). Bytes never transit
 //! the API: clients upload and download directly through presigned URLs.
@@ -13,9 +14,10 @@ use crate::assets::limits as asset_limits;
 use crate::assets::{
     Asset, AssetError, AssetStatus, ByteSize, ContentType, FileName, Sha256Hex, StorageKey, repo,
 };
+use crate::authz::{CreateAsset, DeleteAsset, ReadAsset};
 use crate::db;
 use crate::domain::{AssetId, TenantId};
-use crate::http::AuthPrincipal;
+use crate::http::Require;
 use crate::http::limits as http_limits;
 use crate::http::state::AppState;
 use crate::storage::PresignedUrl;
@@ -78,9 +80,10 @@ pub(crate) struct ListQuery {
 /// `POST /assets` — record a pending asset and issue a presigned upload URL.
 pub(crate) async fn create(
     State(state): State<AppState>,
-    principal: AuthPrincipal,
+    guard: Require<CreateAsset>,
     Json(request): Json<CreateAssetRequest>,
 ) -> Result<(StatusCode, Json<CreateAssetResponse>), AssetError> {
+    let principal = guard.principal;
     let tenant = principal.tenant_id;
     let asset = AssetId::try_from(Uuid::new_v4())?;
     let key = StorageKey::new(tenant, asset);
@@ -125,9 +128,10 @@ pub(crate) async fn create(
 /// `POST /assets/{id}/complete` — verify the uploaded bytes and mark `ready`.
 pub(crate) async fn complete(
     State(state): State<AppState>,
-    principal: AuthPrincipal,
+    guard: Require<CreateAsset>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<AssetView>, AssetError> {
+    let principal = guard.principal;
     let tenant = principal.tenant_id;
     let asset = AssetId::try_from(id)?;
     let existing = fetch(&state, tenant, asset).await?;
@@ -162,10 +166,10 @@ pub(crate) async fn complete(
 /// `GET /assets` — list this tenant's non-deleted assets, newest first.
 pub(crate) async fn list(
     State(state): State<AppState>,
-    principal: AuthPrincipal,
+    guard: Require<ReadAsset>,
     Query(query): Query<ListQuery>,
 ) -> Result<Json<Vec<AssetView>>, AssetError> {
-    let tenant = principal.tenant_id;
+    let tenant = guard.principal.tenant_id;
     let limit = clamp_limit(query.limit);
     // Clamp the offset into `0..=MAX_ASSETS_OFFSET` so a client cannot force an
     // unbounded `OFFSET` scan (CLAUDE.md §5: every batch/scan is bounded).
@@ -187,10 +191,10 @@ pub(crate) async fn list(
 /// `GET /assets/{id}` — metadata plus a short-lived presigned download URL.
 pub(crate) async fn get_one(
     State(state): State<AppState>,
-    principal: AuthPrincipal,
+    guard: Require<ReadAsset>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<AssetDetail>, AssetError> {
-    let tenant = principal.tenant_id;
+    let tenant = guard.principal.tenant_id;
     let asset = AssetId::try_from(id)?;
     let existing = fetch(&state, tenant, asset).await?;
 
@@ -214,10 +218,10 @@ pub(crate) async fn get_one(
 /// `DELETE /assets/{id}` — remove the bytes and soft-delete the row.
 pub(crate) async fn delete(
     State(state): State<AppState>,
-    principal: AuthPrincipal,
+    guard: Require<DeleteAsset>,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, AssetError> {
-    let tenant = principal.tenant_id;
+    let tenant = guard.principal.tenant_id;
     let asset = AssetId::try_from(id)?;
     let existing = fetch(&state, tenant, asset).await?;
 
@@ -488,5 +492,152 @@ mod tests {
         let (status, _) = send(app, req).await;
         // No token → the `AuthPrincipal` extractor rejects with 401, not 400.
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+}
+
+#[cfg(test)]
+mod authz_tests {
+    //! RBAC matrix for `/assets` (issue #13): reads are open to every role;
+    //! `CreateAsset` is admin/sales/coordinator; `DeleteAsset` is admin/coordinator.
+    //! The guard reads the token's role claim, so one seeded user acts as any role.
+
+    use crate::domain::{Role, TenantId, UserId};
+    use crate::http::AppState;
+    use crate::storage::InMemoryObjectStore;
+    use crate::testsupport;
+    use crate::testsupport::bearer;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use http_body_util::BodyExt as _;
+    use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+    use std::sync::Arc;
+    use tower::ServiceExt as _;
+
+    async fn setup(opts: PgPoolOptions, conn: PgConnectOptions) -> (AppState, UserId, TenantId) {
+        let pool = testsupport::app_pool(opts, conn).await;
+        let tenant = testsupport::new_tenant();
+        testsupport::seed_tenant(&pool, tenant, "acme").await;
+        let user =
+            testsupport::seed_user(&pool, tenant, "u@acme.test", Role::Admin, "x", true).await;
+        let state = testsupport::app_state_with_store(
+            pool,
+            Arc::new(InMemoryObjectStore::default()),
+            testsupport::test_clock(),
+            testsupport::auth_context(),
+        )
+        .await;
+        (state, user, tenant)
+    }
+
+    fn post_create(bearer: &str) -> Request<Body> {
+        let body = serde_json::json!({
+            "filename": "card.pdf",
+            "content_type": "application/pdf",
+            "size_bytes": 2048,
+        });
+        Request::builder()
+            .method("POST")
+            .uri("/assets")
+            .header("authorization", bearer)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("build POST")
+    }
+
+    fn request(method: &str, uri: &str, bearer: &str) -> Request<Body> {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("authorization", bearer)
+            .body(Body::empty())
+            .expect("build request")
+    }
+
+    async fn send(state: &AppState, req: Request<Body>) -> (StatusCode, serde_json::Value) {
+        let response = crate::http::router(state.clone())
+            .oneshot(req)
+            .await
+            .expect("router responds");
+        let status = response.status();
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, json)
+    }
+
+    /// Creates a pending asset as admin and returns its id string.
+    async fn create_as_admin(state: &AppState, user: UserId, tenant: TenantId) -> String {
+        let admin = bearer(state, user, tenant, Role::Admin);
+        let (status, body) = send(state, post_create(&admin)).await;
+        assert_eq!(status, StatusCode::CREATED);
+        body["asset_id"].as_str().expect("asset_id").to_owned()
+    }
+
+    #[sqlx::test]
+    async fn create_asset_is_admin_sales_coordinator(opts: PgPoolOptions, conn: PgConnectOptions) {
+        let (state, user, tenant) = setup(opts, conn).await;
+
+        for role in [Role::Admin, Role::Sales, Role::Coordinator] {
+            let token = bearer(&state, user, tenant, role);
+            let (status, _) = send(&state, post_create(&token)).await;
+            assert_eq!(status, StatusCode::CREATED, "role {role:?} may create");
+        }
+        for role in [Role::Scheduler, Role::Operator] {
+            let token = bearer(&state, user, tenant, role);
+            let (status, _) = send(&state, post_create(&token)).await;
+            assert_eq!(
+                status,
+                StatusCode::FORBIDDEN,
+                "role {role:?} may not create"
+            );
+        }
+    }
+
+    #[sqlx::test]
+    async fn read_assets_is_allowed_for_every_role(opts: PgPoolOptions, conn: PgConnectOptions) {
+        let (state, user, tenant) = setup(opts, conn).await;
+        for role in [
+            Role::Admin,
+            Role::Sales,
+            Role::Coordinator,
+            Role::Scheduler,
+            Role::Operator,
+        ] {
+            let token = bearer(&state, user, tenant, role);
+            let (status, _) = send(&state, request("GET", "/assets", &token)).await;
+            assert_eq!(status, StatusCode::OK, "role {role:?} may list assets");
+        }
+    }
+
+    #[sqlx::test]
+    async fn delete_asset_is_admin_coordinator_only(opts: PgPoolOptions, conn: PgConnectOptions) {
+        let (state, user, tenant) = setup(opts, conn).await;
+
+        // Sales/scheduler/operator are refused before any work (403).
+        for role in [Role::Sales, Role::Scheduler, Role::Operator] {
+            let id = create_as_admin(&state, user, tenant).await;
+            let token = bearer(&state, user, tenant, role);
+            let (status, _) =
+                send(&state, request("DELETE", &format!("/assets/{id}"), &token)).await;
+            assert_eq!(
+                status,
+                StatusCode::FORBIDDEN,
+                "role {role:?} may not delete"
+            );
+        }
+
+        // Coordinator is permitted (admin too, by construction).
+        let id = create_as_admin(&state, user, tenant).await;
+        let coordinator = bearer(&state, user, tenant, Role::Coordinator);
+        let (status, _) = send(
+            &state,
+            request("DELETE", &format!("/assets/{id}"), &coordinator),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "coordinator may delete");
     }
 }

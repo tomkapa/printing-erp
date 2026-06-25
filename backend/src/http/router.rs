@@ -1,12 +1,12 @@
 //! HTTP router assembly and global middleware.
 
 use super::limits;
-use super::routes::{assets, auth, health, settings, tenant};
+use super::routes::{assets, auth, health, settings, tenant, users};
 use super::state::AppState;
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::http::StatusCode;
-use axum::routing::{get, post};
+use axum::routing::{get, patch, post};
 use tower_http::cors::CorsLayer;
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
@@ -40,6 +40,10 @@ pub(crate) fn router(state: AppState) -> Router {
             "/settings",
             get(settings::get_settings).put(settings::put_settings),
         )
+        // User management ("role center"): list/create/modify tenant users and
+        // their roles. Admin-only, enforced by the `Require<ManageUsers>` guard.
+        .route("/users", post(users::create_user).get(users::list_users))
+        .route("/users/{id}", patch(users::update_user))
         .layer(TraceLayer::new_for_http())
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
