@@ -3,7 +3,7 @@
 //!
 //! It owns the HS256 signing/verifying keys (which never leave the struct), the
 //! pre-built decode [`Validation`], the issuer, and the token lifetimes. Handlers
-//! and the `AuthPrincipal` extractor mint and verify access tokens through it.
+//! and the `Require` guard mint and verify access tokens through it.
 
 use super::claims::{AccessClaims, JwtError, build_validation, decode_access, encode_access};
 use super::limits::MIN_JWT_SECRET_BYTES;

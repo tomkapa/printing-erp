@@ -27,7 +27,7 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/auth/password/forgot", post(auth::password_forgot))
         .route("/auth/password/reset", post(auth::password_reset))
         // Authenticated tenant echo: resolves the tenant from a verified access
-        // token (`AuthPrincipal`) and reports its RLS-visible user count.
+        // token (via the `Require` guard) and reports its RLS-visible user count.
         .route("/tenant/me", get(tenant::me))
         // Asset upload/download. Bytes move out of band via presigned URLs, so
         // these endpoints carry only small JSON metadata.
@@ -35,7 +35,7 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/assets/{id}", get(assets::get_one).delete(assets::delete))
         .route("/assets/{id}/complete", post(assets::complete))
         // Per-tenant business configuration (logo, identity, tax, currency,
-        // default unit). Authenticated via the same `AuthPrincipal` extractor.
+        // default unit). Authorized via the same `Require` guard.
         .route(
             "/settings",
             get(settings::get_settings).put(settings::put_settings),

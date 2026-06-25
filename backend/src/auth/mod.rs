@@ -2,7 +2,7 @@
 //! tokens, and password reset (issue #12).
 //!
 //! Tenancy interplay: the request tenant is derived from a verified access-token
-//! claim (`http::AuthPrincipal`), never a client-supplied header — RLS
+//! claim (resolved by the `http::Require` guard), never a client-supplied header — RLS
 //! (SPEC.md §Tenancy) is only a backstop against a *missing* filter, not against
 //! a caller who claims another tenant. Refresh and reset tokens are *routable*
 //! (`<tenant>.<secret>`) so the server can open the correct tenant transaction

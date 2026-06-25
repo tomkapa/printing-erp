@@ -1,6 +1,5 @@
 //! HTTP layer: router assembly, shared state, route handlers and limits.
 
-mod auth_principal;
 mod limits;
 mod require;
 mod router;

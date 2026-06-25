@@ -279,7 +279,7 @@ fn view_of(asset: Asset) -> AssetView {
 
 #[cfg(test)]
 mod tests {
-    //! End-to-end handler tests: real router + the `AuthPrincipal` extractor +
+    //! End-to-end handler tests: real router + the `Require` guard +
     //! tenant transaction against Postgres, with the in-memory object store
     //! standing in for S3. Requests carry a real Bearer access token minted from
     //! the test [`AuthContext`](crate::auth::AuthContext) (CLAUDE.md §3).
@@ -490,7 +490,7 @@ mod tests {
             .body(Body::empty())
             .expect("build request");
         let (status, _) = send(app, req).await;
-        // No token → the `AuthPrincipal` extractor rejects with 401, not 400.
+        // No token → the `Require` guard rejects with 401, not 400.
         assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 }
