@@ -1,7 +1,7 @@
 //! HTTP router assembly and global middleware.
 
 use super::limits;
-use super::routes::{assets, auth, health, settings, tenant, users};
+use super::routes::{assets, auth, contacts, customers, health, settings, tenant, users};
 use super::state::AppState;
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
@@ -48,7 +48,25 @@ pub(crate) fn router(state: AppState) -> Router {
         // User management ("role center"): list/create/modify tenant users and
         // their roles. Admin-only, enforced by the `Require<ManageUsers>` guard.
         .route("/users", post(users::create_user).get(users::list_users))
-        .route("/users/{id}", patch(users::update_user));
+        .route("/users/{id}", patch(users::update_user))
+        // CRM (issue #17): customer profiles and their contacts. Codes are
+        // system-assigned (`CS001`, …); removal is a soft archive. Contacts are a
+        // sub-resource sharing the customer capabilities.
+        .route("/customers", post(customers::create).get(customers::list))
+        .route(
+            "/customers/{id}",
+            get(customers::get_one)
+                .patch(customers::update)
+                .delete(customers::delete),
+        )
+        .route(
+            "/customers/{customer_id}/contacts",
+            post(contacts::create).get(contacts::list),
+        )
+        .route(
+            "/contacts/{id}",
+            patch(contacts::update).delete(contacts::delete),
+        );
 
     Router::new()
         .route("/health/live", get(health::live))

@@ -125,6 +125,77 @@ impl TryFrom<&str> for AssetId {
     }
 }
 
+/// Identifier of a [`Customer`](crate::crm) — a tenant's client (issue #17).
+///
+/// Same invariants as [`TenantId`]: constructed only via [`TryFrom`], always a
+/// non-nil UUID, inner field private (CLAUDE.md §1). Read it with
+/// [`CustomerId::as_uuid`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "Uuid")]
+pub(crate) struct CustomerId(Uuid);
+
+impl CustomerId {
+    /// The underlying UUID, for binding to SQL or rendering at the boundary.
+    pub(crate) const fn as_uuid(self) -> Uuid {
+        self.0
+    }
+}
+
+impl TryFrom<Uuid> for CustomerId {
+    type Error = DomainError;
+
+    fn try_from(raw: Uuid) -> Result<Self, Self::Error> {
+        if raw.is_nil() {
+            return Err(DomainError::Nil("customer_id"));
+        }
+        Ok(Self(raw))
+    }
+}
+
+impl TryFrom<&str> for CustomerId {
+    type Error = DomainError;
+
+    fn try_from(raw: &str) -> Result<Self, Self::Error> {
+        let parsed = Uuid::parse_str(raw).map_err(|_| DomainError::Malformed("customer_id"))?;
+        Self::try_from(parsed)
+    }
+}
+
+/// Identifier of a [`Contact`](crate::crm) — a person at a customer (issue #17).
+///
+/// Same invariants as [`CustomerId`]: constructed only via [`TryFrom`], always a
+/// non-nil UUID, inner field private. Read it with [`ContactId::as_uuid`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "Uuid")]
+pub(crate) struct ContactId(Uuid);
+
+impl ContactId {
+    /// The underlying UUID, for binding to SQL or rendering at the boundary.
+    pub(crate) const fn as_uuid(self) -> Uuid {
+        self.0
+    }
+}
+
+impl TryFrom<Uuid> for ContactId {
+    type Error = DomainError;
+
+    fn try_from(raw: Uuid) -> Result<Self, Self::Error> {
+        if raw.is_nil() {
+            return Err(DomainError::Nil("contact_id"));
+        }
+        Ok(Self(raw))
+    }
+}
+
+impl TryFrom<&str> for ContactId {
+    type Error = DomainError;
+
+    fn try_from(raw: &str) -> Result<Self, Self::Error> {
+        let parsed = Uuid::parse_str(raw).map_err(|_| DomainError::Malformed("contact_id"))?;
+        Self::try_from(parsed)
+    }
+}
+
 /// Identifier of a [`User`](crate). Constructed only via [`TryFrom`], so it is
 /// always a non-nil UUID. Read it with [`UserId::as_uuid`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -183,7 +254,7 @@ impl TryFrom<Uuid> for RefreshTokenId {
 
 #[cfg(test)]
 mod tests {
-    use super::{AssetId, DomainError, RefreshTokenId, TenantId, UserId};
+    use super::{AssetId, ContactId, CustomerId, DomainError, RefreshTokenId, TenantId, UserId};
     use uuid::Uuid;
 
     #[test]
@@ -250,6 +321,68 @@ mod tests {
         assert_eq!(
             AssetId::try_from("not-a-uuid").expect_err("malformed rejected"),
             DomainError::Malformed("asset_id")
+        );
+    }
+
+    #[test]
+    fn customer_id_round_trips_and_rejects_nil_and_malformed() {
+        let raw = Uuid::new_v4();
+        let id = CustomerId::try_from(raw).expect("non-nil uuid is a valid customer id");
+        assert_eq!(id.as_uuid(), raw);
+
+        let from_str =
+            CustomerId::try_from(raw.to_string().as_str()).expect("canonical string parses");
+        assert_eq!(from_str, id);
+
+        assert_eq!(
+            CustomerId::try_from(Uuid::nil()).expect_err("nil rejected"),
+            DomainError::Nil("customer_id")
+        );
+        assert_eq!(
+            CustomerId::try_from("not-a-uuid").expect_err("malformed rejected"),
+            DomainError::Malformed("customer_id")
+        );
+    }
+
+    #[test]
+    fn contact_id_round_trips_and_rejects_nil_and_malformed() {
+        let raw = Uuid::new_v4();
+        let id = ContactId::try_from(raw).expect("non-nil uuid is a valid contact id");
+        assert_eq!(id.as_uuid(), raw);
+
+        let from_str =
+            ContactId::try_from(raw.to_string().as_str()).expect("canonical string parses");
+        assert_eq!(from_str, id);
+
+        assert_eq!(
+            ContactId::try_from(Uuid::nil()).expect_err("nil rejected"),
+            DomainError::Nil("contact_id")
+        );
+        assert_eq!(
+            ContactId::try_from("nope").expect_err("malformed rejected"),
+            DomainError::Malformed("contact_id")
+        );
+    }
+
+    #[test]
+    fn customer_and_contact_ids_deserialize_through_try_from() {
+        // The `#[serde(try_from = "Uuid")]` path must funnel through the smart
+        // constructor: a valid uuid deserializes, a nil one is rejected (§1).
+        let raw = Uuid::new_v4();
+        let json = format!("\"{raw}\"");
+        let customer: CustomerId = serde_json::from_str(&json).expect("valid uuid deserializes");
+        assert_eq!(customer.as_uuid(), raw);
+        let contact: ContactId = serde_json::from_str(&json).expect("valid uuid deserializes");
+        assert_eq!(contact.as_uuid(), raw);
+
+        let nil = format!("\"{}\"", Uuid::nil());
+        assert!(
+            serde_json::from_str::<CustomerId>(&nil).is_err(),
+            "nil customer id rejected at the boundary"
+        );
+        assert!(
+            serde_json::from_str::<ContactId>(&nil).is_err(),
+            "nil contact id rejected at the boundary"
         );
     }
 

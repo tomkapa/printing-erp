@@ -12,7 +12,7 @@ mod capability;
 mod permission;
 
 pub(crate) use capability::{
-    Capability, CreateAsset, DeleteAsset, ManageUsers, ReadAsset, ReadSettings, ReadTenant,
-    WriteSettings,
+    Capability, CreateAsset, DeleteAsset, DeleteCustomer, ManageUsers, ReadAsset, ReadCustomer,
+    ReadSettings, ReadTenant, WriteCustomer, WriteSettings,
 };
 pub(crate) use permission::{Permission, permits};

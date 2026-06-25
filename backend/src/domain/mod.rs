@@ -14,7 +14,9 @@ mod password;
 mod settings;
 mod user;
 
-pub(crate) use ids::{AssetId, DomainError, RefreshTokenId, TenantId, UserId};
+pub(crate) use ids::{
+    AssetId, ContactId, CustomerId, DomainError, RefreshTokenId, TenantId, UserId,
+};
 pub(crate) use password::PlaintextPassword;
 pub(crate) use settings::{
     Address, BusinessSettings, BusinessSettingsRow, EmailAddress, LogoRef, Phone, TaxCode,

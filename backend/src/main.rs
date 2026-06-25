@@ -18,6 +18,7 @@ mod auth;
 mod authz;
 mod clock;
 mod config;
+mod crm;
 mod db;
 mod domain;
 mod http;
