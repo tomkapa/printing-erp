@@ -23,7 +23,8 @@ Ingress is disabled. Port-forward to try it locally:
 {{- if not (include "printing-erp.hasSecret" .) }}
 
 WARNING: no secret source configured (externalSecret.enabled / existingSecret).
-The backend needs APP__DATABASE__URL, APP__DATABASE__ADMIN_URL, APP__REDIS__URL,
-APP__STORAGE__ACCESS_KEY_ID, APP__STORAGE__SECRET_ACCESS_KEY and APP__AUTH__JWT_SECRET
-to start. Provide them via a secret store before expecting the pod to become ready.
+The backend needs APP__DATABASE__URL, APP__REDIS__URL, APP__STORAGE__ACCESS_KEY_ID,
+APP__STORAGE__SECRET_ACCESS_KEY and APP__AUTH__JWT_SECRET to start
+(APP__DATABASE__ADMIN_URL is optional — it falls back to APP__DATABASE__URL).
+Provide them via a secret store before expecting the pod to become ready.
 {{- end }}

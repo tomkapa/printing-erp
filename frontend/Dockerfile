@@ -18,7 +18,9 @@ COPY . .
 RUN bun run build
 
 # ---- runtime ----------------------------------------------------------------
-FROM nginx:1.27-alpine AS runtime
+# Unprivileged nginx: runs as a non-root user (uid 101) and listens on 8080, so
+# no root and no privileged-port bind. The server block also listens on 8080.
+FROM nginxinc/nginx-unprivileged:1.27-alpine AS runtime
 COPY --from=builder /build/dist /usr/share/nginx/html
 COPY nginx.conf /etc/nginx/conf.d/default.conf
-EXPOSE 80
+EXPOSE 8080

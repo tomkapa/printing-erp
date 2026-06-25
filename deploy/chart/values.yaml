@@ -34,7 +34,13 @@ backend:
     capabilities:
       drop:
         - ALL
+  # Listener/container port the app binds (APP__SERVER__PORT). A fixed high port,
+  # so the non-root container can always bind it regardless of the Service port.
+  port: 8080
   service:
+    # Exposed Service port. Targets the container's `port` above via the named
+    # `http` port, so this may be overridden (even to 80) without breaking the
+    # non-root listener.
     port: 8080
   # The backend runs DB migrations on startup (as the admin role) before it
   # serves traffic, so the startup probe must tolerate that one-off delay:
@@ -53,6 +59,19 @@ frontend:
     pullPolicy: IfNotPresent
   replicas: 1
   resources: {}
+  # nginx-unprivileged runs as uid 101 and listens on container port 8080.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 101
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    # nginx writes cache/pid under writable dirs, so the root FS is not read-only.
+    readOnlyRootFilesystem: false
+    capabilities:
+      drop:
+        - ALL
   service:
     port: 80
 
@@ -74,7 +93,8 @@ config: {}
 # Either way the Secret keys MUST be named exactly as the env vars the backend
 # reads. Required secret keys:
 #   APP__DATABASE__URL          (runtime, least-privilege erp_app role)
-#   APP__DATABASE__ADMIN_URL    (migrations / DDL — owner role)
+#   APP__DATABASE__ADMIN_URL    (optional — owner role for migrations/DDL; falls
+#                                back to APP__DATABASE__URL when absent)
 #   APP__REDIS__URL             (unless supplied via `config`)
 #   APP__STORAGE__ACCESS_KEY_ID
 #   APP__STORAGE__SECRET_ACCESS_KEY
@@ -109,18 +129,19 @@ redis:
     tag: "7-alpine"
     pullPolicy: IfNotPresent
   resources: {}
-
-# Optional one-shot pre-install/pre-upgrade Job that creates the least-privilege
-# `erp_app` role (mirrors db/init/00-app-role.sql) for self-hosters. In our
-# clusters the infra layer provisions the DB + role, so this stays off.
-bootstrap:
-  enabled: false
-  image:
-    repository: postgres
-    tag: "17-alpine"
-  # Password for the erp_app role the Job creates. A placeholder only — in real
-  # use the role is created by infra with a secret-store-managed password.
-  appRolePassword: "erp_app"
+  # redis:7-alpine ships a `redis` user (uid 999); with no persistence the root
+  # FS can stay read-only.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 999
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop:
+        - ALL
 
 ingress:
   enabled: false

@@ -1,4 +1,8 @@
 # Build context for frontend/Dockerfile. bun reinstalls from the lockfile and
-# vite rebuilds dist inside the image, so neither belongs in the context.
+# vite rebuilds dist inside the image, so neither belongs in the context. Local
+# env files must never enter the context (COPY . .) or they could be baked into
+# the static bundle.
 node_modules
 dist
+.env
+.env.*

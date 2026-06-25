@@ -31,7 +31,7 @@ spec:
             {{- toYaml .Values.backend.securityContext | nindent 12 }}
           ports:
             - name: http
-              containerPort: {{ .Values.backend.service.port }}
+              containerPort: {{ .Values.backend.port }}
           envFrom:
             - configMapRef:
                 name: {{ include "printing-erp.fullname" . }}-backend-config
@@ -40,9 +40,9 @@ spec:
                 name: {{ include "printing-erp.backendSecretName" . }}
             {{- end }}
           env:
-            # Keep the listener in sync with the Service/containerPort.
+            # Bind the fixed listener port (decoupled from the Service port).
             - name: APP__SERVER__PORT
-              value: {{ .Values.backend.service.port | quote }}
+              value: {{ .Values.backend.port | quote }}
             {{- with .Values.backend.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

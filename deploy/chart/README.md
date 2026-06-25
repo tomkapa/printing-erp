@@ -10,15 +10,15 @@ time.
 - **backend** Deployment + Service (`:8080`). Runs DB migrations on startup, so a
   generous `startupProbe` guards first boot; `readinessProbe` hits `/health/ready`
   (DB + Redis). Runs as non-root with a read-only root filesystem.
-- **frontend** Deployment + Service (`:80`) — nginx serving the static SPA.
+- **frontend** Deployment + Service — non-root nginx (uid 101, port 8080) serving
+  the static SPA.
 - **Ingress** with a path split: `/api` (the business API) and `/health` (probes)
   go to the backend; everything else (the SPA shell and its bundled assets) goes
   to the frontend.
 - Optional **ephemeral Redis** (`redis.enabled`) for PR previews.
-- Optional **bootstrap Job** (`bootstrap.enabled`) that creates the `erp_app` role
-  for self-hosters.
 
-It never deploys Postgres — bring your own (`postgres.external` is a reminder).
+It never deploys Postgres — bring your own (`postgres.external` is a reminder). The
+least-privilege `erp_app` role is created by your infra (see `db/init/00-app-role.sql`).
 
 ## Configuration: secret vs non-secret
 
@@ -29,9 +29,10 @@ The chart splits them:
   `APP__STORAGE__BUCKET`, `APP__TELEMETRY__SERVICE_NAME`.
 - **Secret** → an External Secrets store (`externalSecret.enabled`) or a Secret you
   manage (`existingSecret`). Keys must be named exactly as the env vars:
-  `APP__DATABASE__URL`, `APP__DATABASE__ADMIN_URL`, `APP__REDIS__URL`,
-  `APP__STORAGE__ACCESS_KEY_ID`, `APP__STORAGE__SECRET_ACCESS_KEY`,
-  `APP__AUTH__JWT_SECRET` (≥ 256 bits).
+  `APP__DATABASE__URL`, `APP__REDIS__URL`, `APP__STORAGE__ACCESS_KEY_ID`,
+  `APP__STORAGE__SECRET_ACCESS_KEY`, `APP__AUTH__JWT_SECRET` (≥ 256 bits).
+  `APP__DATABASE__ADMIN_URL` is optional — it falls back to `APP__DATABASE__URL`
+  when absent (use it only when the runtime role can't run DDL/migrations).
 
 ## Recommended use: ArgoCD multi-source (private values)
 
@@ -62,5 +63,5 @@ helm install erp deploy/chart \
 ```
 
 You provide `erp-secrets` (a Secret with the keys above) and a reachable Postgres
-and Redis. Set `bootstrap.enabled=true` to have the chart create the `erp_app`
-role for you.
+and Redis. Create the `erp_app` role on your database first — see
+`db/init/00-app-role.sql`.

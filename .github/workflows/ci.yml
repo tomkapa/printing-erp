@@ -12,6 +12,8 @@ concurrency:
 permissions:
   contents: read
 
+# Actions are pinned to commit SHAs (supply-chain hardening; .github/dependabot.yml
+# keeps them current). The trailing comment is the human-readable version.
 jobs:
   # Backend exit gates (CLAUDE.md §3) against a real Postgres + Redis.
   backend:
@@ -42,11 +44,13 @@ jobs:
       # Admin role: #[sqlx::test] creates an ephemeral DB per test from this URL.
       DATABASE_URL: postgres://erp:erp@localhost:5432/erp
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: backend
       - name: Provision erp_app role (least-privilege, RLS)
@@ -60,7 +64,7 @@ jobs:
       - run: cargo check --all-targets --all-features
       - run: cargo test --all-features
       - name: Install supply-chain tools
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@ace6ebe54a6a0c86dfb5f7764b17f793b6925bc3 # v2
         with:
           tool: cargo-deny,cargo-audit
       # `licenses` is skipped until the team adds a deny.toml allowlist; advisories,
@@ -75,8 +79,10 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
       - run: bun install --frozen-lockfile
       - run: bun run build
 
@@ -84,8 +90,10 @@ jobs:
   helm:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: azure/setup-helm@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
       - run: helm lint deploy/chart
       - run: helm template erp deploy/chart
       - run: helm template erp deploy/chart -f deploy/chart/ci/full-values.yaml

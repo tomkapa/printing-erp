@@ -1,5 +1,5 @@
 # Placeholder values used by CI to render every conditional path of the chart
-# (ingress, external secret, redis, bootstrap). No real hostnames or secrets.
+# (ingress, external secret, redis). No real hostnames or secrets.
 externalSecret:
   enabled: true
   data:
@@ -18,9 +18,6 @@ config:
   APP__REDIS__URL: redis://printing-erp-redis:6379
 
 redis:
-  enabled: true
-
-bootstrap:
   enabled: true
 
 imagePullSecrets:
