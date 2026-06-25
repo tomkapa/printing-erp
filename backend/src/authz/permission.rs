@@ -27,6 +27,12 @@ pub(crate) enum Permission {
     DeleteAsset,
     /// Manage tenant users and their roles (all `/users` routes).
     ManageUsers,
+    /// Read customers and their contacts (`GET /customers`, `…/{id}`, `…/contacts`).
+    ReadCustomer,
+    /// Create or update a customer/contact (`POST`/`PATCH` on `/customers`, `/contacts`).
+    WriteCustomer,
+    /// Archive a customer/contact (`DELETE /customers/{id}`, `DELETE /contacts/{id}`).
+    DeleteCustomer,
 }
 
 #[cfg(test)]
@@ -35,7 +41,7 @@ impl Permission {
     /// with the enum by the `expected` anchor below: adding a variant there fails
     /// to compile until the matrix is extended (CLAUDE.md §1). Test-only — the
     /// production policy reaches each variant through its capability marker.
-    pub(crate) const ALL: [Self; 7] = [
+    pub(crate) const ALL: [Self; 10] = [
         Self::ReadTenant,
         Self::ReadSettings,
         Self::WriteSettings,
@@ -43,6 +49,9 @@ impl Permission {
         Self::CreateAsset,
         Self::DeleteAsset,
         Self::ManageUsers,
+        Self::ReadCustomer,
+        Self::WriteCustomer,
+        Self::DeleteCustomer,
     ];
 }
 
@@ -52,19 +61,30 @@ impl Permission {
 pub(crate) const fn permits(role: Role, perm: Permission) -> bool {
     // Only the permissions a non-admin role can hold are named here; admin
     // short-circuits to `true`, and `WriteSettings`/`ManageUsers` are admin-only.
-    use Permission::{CreateAsset, DeleteAsset, ReadAsset, ReadSettings, ReadTenant};
+    use Permission::{
+        CreateAsset, DeleteAsset, DeleteCustomer, ReadAsset, ReadCustomer, ReadSettings,
+        ReadTenant, WriteCustomer,
+    };
     match role {
         // Admin holds every capability (the tenant's superuser).
         Role::Admin => true,
-        Role::Sales => matches!(perm, ReadTenant | ReadSettings | ReadAsset | CreateAsset),
-        Role::Coordinator => {
-            matches!(
-                perm,
-                ReadTenant | ReadSettings | ReadAsset | CreateAsset | DeleteAsset
-            )
-        }
-        Role::Scheduler => matches!(perm, ReadTenant | ReadSettings | ReadAsset),
-        Role::Operator => matches!(perm, ReadTenant | ReadSettings | ReadAsset),
+        Role::Sales => matches!(
+            perm,
+            ReadTenant | ReadSettings | ReadAsset | CreateAsset | ReadCustomer | WriteCustomer
+        ),
+        Role::Coordinator => matches!(
+            perm,
+            ReadTenant
+                | ReadSettings
+                | ReadAsset
+                | CreateAsset
+                | DeleteAsset
+                | ReadCustomer
+                | WriteCustomer
+                | DeleteCustomer
+        ),
+        Role::Scheduler => matches!(perm, ReadTenant | ReadSettings | ReadAsset | ReadCustomer),
+        Role::Operator => matches!(perm, ReadTenant | ReadSettings | ReadAsset | ReadCustomer),
     }
 }
 
@@ -94,11 +114,14 @@ mod tests {
         // this match and forces the matrix to be extended.
         match perm {
             //                                  admin  sales  coord  sched  op
-            Permission::ReadTenant | Permission::ReadSettings | Permission::ReadAsset => {
-                [true, true, true, true, true]
+            Permission::ReadTenant
+            | Permission::ReadSettings
+            | Permission::ReadAsset
+            | Permission::ReadCustomer => [true, true, true, true, true],
+            Permission::CreateAsset | Permission::WriteCustomer => [true, true, true, false, false],
+            Permission::DeleteAsset | Permission::DeleteCustomer => {
+                [true, false, true, false, false]
             }
-            Permission::CreateAsset => [true, true, true, false, false],
-            Permission::DeleteAsset => [true, false, true, false, false],
             Permission::WriteSettings | Permission::ManageUsers => {
                 [true, false, false, false, false]
             }
@@ -107,7 +130,7 @@ mod tests {
 
     #[test]
     fn permits_matches_the_policy_matrix() {
-        // 7 permissions × 5 roles = the full truth table, cell by cell. This
+        // 10 permissions × 5 roles = the full truth table, cell by cell. This
         // alone exercises every arm of `permits` (100% coverage, CLAUDE.md §3).
         for perm in Permission::ALL {
             let row = expected(perm);
@@ -138,7 +161,7 @@ mod tests {
 
     #[test]
     fn all_has_the_full_arity_and_no_duplicates() {
-        assert_eq!(Permission::ALL.len(), 7);
+        assert_eq!(Permission::ALL.len(), 10);
         for (i, a) in Permission::ALL.into_iter().enumerate() {
             for b in Permission::ALL.into_iter().skip(i + 1) {
                 assert_ne!(a, b, "ALL must not contain duplicates");

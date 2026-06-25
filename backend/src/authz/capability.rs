@@ -71,11 +71,32 @@ impl Capability for ManageUsers {
     const PERMISSION: Permission = Permission::ManageUsers;
 }
 
+/// Guards customer/contact reads (`GET /customers`, `…/{id}`, `…/contacts`).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ReadCustomer;
+impl Capability for ReadCustomer {
+    const PERMISSION: Permission = Permission::ReadCustomer;
+}
+
+/// Guards customer/contact writes (`POST`/`PATCH` on `/customers`, `/contacts`).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct WriteCustomer;
+impl Capability for WriteCustomer {
+    const PERMISSION: Permission = Permission::WriteCustomer;
+}
+
+/// Guards customer/contact archival (`DELETE /customers/{id}`, `DELETE /contacts/{id}`).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DeleteCustomer;
+impl Capability for DeleteCustomer {
+    const PERMISSION: Permission = Permission::DeleteCustomer;
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        Capability, CreateAsset, DeleteAsset, ManageUsers, ReadAsset, ReadSettings, ReadTenant,
-        WriteSettings,
+        Capability, CreateAsset, DeleteAsset, DeleteCustomer, ManageUsers, ReadAsset, ReadCustomer,
+        ReadSettings, ReadTenant, WriteCustomer, WriteSettings,
     };
     use crate::authz::Permission;
 
@@ -88,5 +109,8 @@ mod tests {
         assert_eq!(CreateAsset::PERMISSION, Permission::CreateAsset);
         assert_eq!(DeleteAsset::PERMISSION, Permission::DeleteAsset);
         assert_eq!(ManageUsers::PERMISSION, Permission::ManageUsers);
+        assert_eq!(ReadCustomer::PERMISSION, Permission::ReadCustomer);
+        assert_eq!(WriteCustomer::PERMISSION, Permission::WriteCustomer);
+        assert_eq!(DeleteCustomer::PERMISSION, Permission::DeleteCustomer);
     }
 }
