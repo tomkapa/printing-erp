@@ -5,6 +5,7 @@
 //! - [`telemetry`] — tracing + OpenTelemetry bootstrap
 //! - [`clock`]     — the time abstraction (CLAUDE.md §11)
 //! - [`db`]        — PostgreSQL pool + migrations
+//! - [`authz`]     — role→permission policy + route guards (RBAC, #13)
 //! - [`http`]      — axum router, state and route handlers
 //! - [`app`]       — wires everything together and serves until shutdown
 //!
@@ -14,6 +15,7 @@
 mod app;
 mod assets;
 mod auth;
+mod authz;
 mod clock;
 mod config;
 mod db;

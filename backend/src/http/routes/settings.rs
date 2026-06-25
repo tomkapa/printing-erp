@@ -3,17 +3,18 @@
 //! `GET /api/settings` returns the requesting tenant's business configuration;
 //! `PUT /api/settings` creates or replaces it (an idempotent upsert — SPEC.md
 //! §Retry and idempotency). Both resolve the tenant from the authenticated
-//! [`AuthPrincipal`] and run inside a tenant-scoped transaction
+//! principal (via the [`Require`] guard) and run inside a tenant-scoped transaction
 //! ([`db::begin_tenant_tx`]), so Row-Level Security keys every read and write to
 //! the caller's tenant.
 
 use crate::assets::{self, Asset, AssetError, AssetStatus};
+use crate::authz::{ReadSettings, WriteSettings};
 use crate::db;
 use crate::domain::{
     Address, AssetId, BusinessSettings, BusinessSettingsRow, EmailAddress, LogoRef, Phone, TaxCode,
     TenantId,
 };
-use crate::http::AuthPrincipal;
+use crate::http::Require;
 use crate::http::limits;
 use crate::http::state::AppState;
 use crate::storage::{self, PresignedUrl};
@@ -96,8 +97,9 @@ impl IntoResponse for SettingsError {
 /// `GET /api/settings` — the tenant's business configuration, or `404` if unset.
 pub(crate) async fn get_settings(
     State(state): State<AppState>,
-    principal: AuthPrincipal,
+    guard: Require<ReadSettings>,
 ) -> Result<Json<SettingsResponse>, SettingsError> {
+    let principal = guard.principal;
     let row = timeout(
         limits::SETTINGS_QUERY_TIMEOUT,
         load_row(&state.db, principal.tenant_id),
@@ -113,9 +115,10 @@ pub(crate) async fn get_settings(
 /// `PUT /api/settings` — create or replace the tenant's business configuration.
 pub(crate) async fn put_settings(
     State(state): State<AppState>,
-    principal: AuthPrincipal,
+    guard: Require<WriteSettings>,
     Json(input): Json<BusinessSettings>,
 ) -> Result<Json<SettingsResponse>, SettingsError> {
+    let principal = guard.principal;
     let row = timeout(
         limits::SETTINGS_QUERY_TIMEOUT,
         upsert_row(&state.db, principal.tenant_id, &input),
@@ -749,6 +752,129 @@ mod handler_tests {
         assert!(
             body.get("logo_download_url").is_none(),
             "logo_download_url is absent when no logo has been set"
+        );
+    }
+}
+
+#[cfg(test)]
+mod authz_tests {
+    //! RBAC matrix for `/settings` (issue #13): `WriteSettings` is admin-only;
+    //! `ReadSettings` is open to every role. Also asserts authentication runs
+    //! before authorization — a request with no token is `401`, never `403`.
+
+    use crate::domain::{Role, TenantId, UserId};
+    use crate::http::AppState;
+    use crate::testsupport;
+    use crate::testsupport::bearer;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+
+    const NON_ADMIN: [Role; 4] = [
+        Role::Sales,
+        Role::Coordinator,
+        Role::Scheduler,
+        Role::Operator,
+    ];
+
+    /// Seeds a tenant with one user and returns the state plus that user/tenant.
+    /// The guard reads the *token's* role claim, so a single seeded user can
+    /// stand in for any role by minting a token with that role.
+    async fn setup(opts: PgPoolOptions, conn: PgConnectOptions) -> (AppState, UserId, TenantId) {
+        let pool = testsupport::app_pool(opts, conn).await;
+        let tenant = testsupport::new_tenant();
+        testsupport::seed_tenant(&pool, tenant, "acme").await;
+        let user =
+            testsupport::seed_user(&pool, tenant, "u@acme.test", Role::Admin, "x", true).await;
+        let state =
+            testsupport::app_state(pool, testsupport::test_clock(), testsupport::auth_context())
+                .await;
+        (state, user, tenant)
+    }
+
+    fn put(authorization: Option<&str>) -> Request<Body> {
+        let body = serde_json::json!({
+            "legal_name": "Acme Print Co",
+            "currency": "VND",
+            "tax_rate_bps": 1000,
+            "default_unit": "tờ",
+        });
+        let mut builder = Request::builder()
+            .method("PUT")
+            .uri("/api/settings")
+            .header("content-type", "application/json");
+        if let Some(value) = authorization {
+            builder = builder.header("authorization", value);
+        }
+        builder
+            .body(Body::from(body.to_string()))
+            .expect("build PUT")
+    }
+
+    fn get(authorization: &str) -> Request<Body> {
+        Request::builder()
+            .uri("/api/settings")
+            .header("authorization", authorization)
+            .body(Body::empty())
+            .expect("build GET")
+    }
+
+    /// Sends `req` through a freshly-built router over a clone of `state`.
+    async fn status(state: &AppState, req: Request<Body>) -> StatusCode {
+        testsupport::send(state, req).await.0
+    }
+
+    #[sqlx::test]
+    async fn put_settings_is_admin_only(opts: PgPoolOptions, conn: PgConnectOptions) {
+        let (state, user, tenant) = setup(opts, conn).await;
+
+        for role in NON_ADMIN {
+            let token = bearer(&state, user, tenant, role);
+            assert_eq!(
+                status(&state, put(Some(&token))).await,
+                StatusCode::FORBIDDEN,
+                "role {role:?} must not write settings"
+            );
+        }
+
+        let admin = bearer(&state, user, tenant, Role::Admin);
+        assert_eq!(
+            status(&state, put(Some(&admin))).await,
+            StatusCode::OK,
+            "admin may write settings"
+        );
+    }
+
+    #[sqlx::test]
+    async fn get_settings_is_allowed_for_every_role(opts: PgPoolOptions, conn: PgConnectOptions) {
+        let (state, user, tenant) = setup(opts, conn).await;
+        // Seed the row as admin so a read returns 200 (not 404) — the point under
+        // test is that a read is authorized, not that the row is absent.
+        let admin = bearer(&state, user, tenant, Role::Admin);
+        assert_eq!(status(&state, put(Some(&admin))).await, StatusCode::OK);
+
+        for role in NON_ADMIN {
+            let token = bearer(&state, user, tenant, role);
+            assert_eq!(
+                status(&state, get(&token)).await,
+                StatusCode::OK,
+                "role {role:?} must be able to read settings"
+            );
+        }
+    }
+
+    #[sqlx::test]
+    async fn put_settings_without_token_is_401_not_403(
+        opts: PgPoolOptions,
+        conn: PgConnectOptions,
+    ) {
+        let (state, _user, _tenant) = setup(opts, conn).await;
+        // Authn precedes authz: a missing token is unauthorized, and must not
+        // leak (via 403) that the route needs the WriteSettings capability.
+        assert_eq!(
+            status(&state, put(None)).await,
+            StatusCode::UNAUTHORIZED,
+            "no token must be 401, never 403"
         );
     }
 }

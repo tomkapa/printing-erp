@@ -19,4 +19,4 @@ pub(crate) use password::PlaintextPassword;
 pub(crate) use settings::{
     Address, BusinessSettings, BusinessSettingsRow, EmailAddress, LogoRef, Phone, TaxCode,
 };
-pub(crate) use user::{Email, Role, TenantSlug};
+pub(crate) use user::{DisplayName, Email, Role, TenantSlug};

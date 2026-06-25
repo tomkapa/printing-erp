@@ -2,12 +2,13 @@
 //!
 //! `me` reports the authenticated principal and how many users are visible under
 //! Row-Level Security. The tenant now comes from a verified access-token claim
-//! ([`AuthPrincipal`]) rather than a client header, so it doubles as the
+//! (via the [`Require`] guard) rather than a client header, so it doubles as the
 //! end-to-end check that the auth → RLS path is wired correctly.
 
+use crate::authz::ReadTenant;
 use crate::db;
 use crate::domain::{Role, TenantId, UserId};
-use crate::http::AuthPrincipal;
+use crate::http::Require;
 use crate::http::limits;
 use crate::http::state::AppState;
 use axum::Json;
@@ -30,8 +31,9 @@ pub(crate) struct TenantMeBody {
 /// user count.
 pub(crate) async fn me(
     State(state): State<AppState>,
-    principal: AuthPrincipal,
+    guard: Require<ReadTenant>,
 ) -> Result<Json<TenantMeBody>, StatusCode> {
+    let principal = guard.principal;
     // The whole tenant-scoped round-trip is bounded (CLAUDE.md §5): a stalled
     // server or lock wait frees the pooled connection instead of hanging until
     // the global request timeout.
@@ -65,9 +67,10 @@ fn internal_error<E: std::fmt::Debug>(error: E) -> StatusCode {
 #[cfg(test)]
 mod tests {
     use super::me;
-    use crate::domain::{Role, TenantId, UserId};
+    use crate::domain::Role;
     use crate::http::AppState;
     use crate::testsupport;
+    use crate::testsupport::bearer;
     use axum::Router;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
@@ -81,15 +84,6 @@ mod tests {
         Router::new()
             .route("/api/tenant/me", get(me))
             .with_state(state)
-    }
-
-    /// Mints a valid access token for `user`/`tenant`/`role` at the test epoch.
-    fn bearer(state: &AppState, user: UserId, tenant: TenantId, role: Role) -> String {
-        let token = state
-            .auth()
-            .issue_access(user, tenant, role, testsupport::epoch())
-            .expect("issue access token");
-        format!("Bearer {token}")
     }
 
     async fn get_me(state: AppState, authorization: Option<String>) -> StatusCode {
